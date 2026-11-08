@@ -1,0 +1,20 @@
+# build artefacts
+build/
+dist/
+release/
+*.spec
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# dev only
+tools/shots/
+tools/vframe_*.jpg
+tools/vid_*.jpg
+tools/strip_*.png
+tools/src_crop*.png
+tools/contact.jpg
+tools/sam_on_magenta.png
+tools/crop_bottom.png
+build/
+out/*.tmp
