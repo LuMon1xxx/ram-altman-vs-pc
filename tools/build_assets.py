@@ -20,10 +20,14 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 ASSETS = os.path.join(ROOT, "assets")
+
+
 def find_source_media():
     """Source cutouts live in ./source_media (fallback: the original folder)."""
-    for cand in (os.path.join(ROOT, "source_media"),
-                 os.path.join(os.path.dirname(ROOT), "фото и видео")):
+    for cand in (
+        os.path.join(ROOT, "source_media"),
+        os.path.join(os.path.dirname(ROOT), "фото и видео"),
+    ):
         if os.path.isdir(cand):
             return cand
     return os.path.join(ROOT, "source_media")
@@ -154,8 +158,41 @@ def trim_band(im, keep_frac=0.72, fade=40):
     return out
 
 
+def fade_edge(im, left=0, right=0, top=0, bottom=0):
+    """Мягкое затухание у краёв: убирает след от обрезки исходника."""
+    w, h = im.size
+    mask = Image.new("L", (w, h), 255)
+    px = mask.load()
+    for x in range(w):
+        v = 255
+        if left and x < left:
+            v = min(v, int(255 * (x / left) ** 0.8))
+        if right and x >= w - right:
+            v = min(v, int(255 * ((w - 1 - x) / right) ** 0.8))
+        if v != 255:
+            for y in range(h):
+                px[x, y] = v
+    for y in range(h):
+        v = 255
+        if top and y < top:
+            v = min(v, int(255 * (y / top) ** 0.8))
+        if bottom and y >= h - bottom:
+            v = min(v, int(255 * ((h - 1 - y) / bottom) ** 0.8))
+        if v != 255:
+            for x in range(w):
+                px[x, y] = min(px[x, y], v)
+    out = im.copy()
+    out.putalpha(ImageChops.multiply(im.split()[3], mask))
+    return out
+
+
 def prep_cutout(
-    src_name, target_h, rim=(120, 225, 255), glow_alpha=150, glow_radius=14
+    src_name,
+    target_h,
+    rim=(120, 225, 255),
+    glow_alpha=150,
+    glow_radius=14,
+    rim_w=7,
 ):
     im = load_rgba(src_name)
     w = max(1, round(im.width * target_h / im.height))
@@ -181,24 +218,30 @@ def prep_cutout(
     aura = aura.point(lambda v: int(v * glow_alpha / 255))
     out = Image.alpha_composite(out, color_mask(aura, rim))
     # hard rim
-    rim_mask = ImageChops.subtract(a.filter(ImageFilter.MaxFilter(7)), a)
+    rim_mask = ImageChops.subtract(a.filter(ImageFilter.MaxFilter(rim_w)), a)
     out = Image.alpha_composite(out, color_mask(rim_mask, rim))
     out.alpha_composite(im, (pad, pad))
     return out
 
 
 def make_sprites():
-    pc = prep_cutout("pc_case.png", 300, rim=(90, 210, 255), glow_alpha=120, glow_radius=12)
+    pc = prep_cutout(
+        "pc_case.png", 300, rim=(90, 210, 255), glow_alpha=120, glow_radius=12
+    )
     save(pc, "pc.png")
     sam_full = prep_cutout(
         "sam_cutout.png",
         330,
-        rim=(80, 255, 175),
-        glow_alpha=110,
-        glow_radius=12,
+        rim=(60, 170, 130),
+        glow_alpha=70,
+        glow_radius=9,
+        rim_w=3,
     )
-    # fight sprite keeps the body, only the last strip of leftover photo bg is cut
+    # боевой спрайт: обрезаем остаток фона снизу и мягко гасим левый край,
+    # потому что в исходнике плечо обрезано ровно по границе кадра
     fight = trim_band(sam_full, 0.92, 46)
+    fight = fight.crop(fight.getbbox())
+    fight = fade_edge(fight, left=34)
     save(fight, "sam_fight.png")
     # poster / avatar use the head-and-shoulders crop
     sam = trim_band(sam_full.copy(), 0.725, 40)
@@ -371,7 +414,10 @@ def fade_bottom(im, start_frac=0.68):
         if y < h * start_frac:
             v = 255
         else:
-            v = int(255 * max(0.0, 1 - (y - h * start_frac) / (h * (1 - start_frac)) ** 1.35))
+            v = int(
+                255
+                * max(0.0, 1 - (y - h * start_frac) / (h * (1 - start_frac)) ** 1.35)
+            )
         mask.putpixel((0, y), v)
     mask = mask.resize((w, h))
     out = im.copy()
@@ -381,41 +427,70 @@ def fade_bottom(im, start_frac=0.68):
 
 def make_thanks_wall(sam):
     """Full-bleed "thank you" poster: copy on the left, Sam on the right."""
-    img = vgrad((W, H), (3, 9, 7), (1, 4, 3)).convert("RGBA")
+    img = vgrad((W, H), (4, 11, 9), (1, 4, 3)).convert("RGBA")
 
-    # soft light behind Sam (no hard edges anywhere)
-    add_glow(img, (26, 190, 132, 255), 620, (980, 360), 0.55)
-    add_glow(img, (60, 255, 175, 255), 320, (960, 300), 0.35)
+    # мягкий свет за Сэмом — без резких краёв
+    add_glow(img, (22, 170, 118, 255), 640, (980, 330), 0.50)
+    add_glow(img, (55, 240, 165, 255), 300, (1010, 250), 0.26)
 
-    s = sam.crop(sam.getbbox())
-    target_h = 470
+    # Сам вырез без зелёной кромки — только его собственный альфа-канал
+    s = load_rgba("sam_cutout.png")
+    target_h = 566
     s = s.resize((round(s.width * target_h / s.height), target_h), Image.LANCZOS)
-    sx = 1262 - s.width
-    sy = 706 - s.height
+    sx = 1266 - s.width
+    sy = 724 - s.height
+
+    # тень под фигурой, чтобы она не «висела»
+    shadow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.ellipse(
+        (
+            sx + s.width * 0.26,
+            sy + s.height * 0.90,
+            sx + s.width * 0.88,
+            sy + s.height * 1.04,
+        ),
+        fill=(0, 0, 0, 95),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(30))
+    img.alpha_composite(shadow)
     img.alpha_composite(s, (sx, sy))
 
     d = ImageDraw.Draw(img, "RGBA")
 
-    # left column
-    logo = load_rgba("chatgpt_logo.png").resize((88, 88), Image.LANCZOS)
-    dark = Image.new("RGBA", logo.size, (22, 60, 46, 0))
-    dark.putalpha(logo.split()[3].point(lambda v: int(v * 0.55)))
-    img.alpha_composite(dark, (74, 62))
+    # левая колонка
+    logo = load_rgba("chatgpt_logo.png").resize((84, 84), Image.LANCZOS)
+    dark = Image.new("RGBA", logo.size, (20, 56, 43, 0))
+    dark.putalpha(logo.split()[3].point(lambda v: int(v * 0.5)))
+    img.alpha_composite(dark, (76, 60))
 
-    d.text((80, 176), "СПАСИБО", font=font(IMPACT, 112), fill=(110, 245, 178, 255))
-    d.text((80, 268), "ЗА ВКЛАД!", font=font(IMPACT, 112), fill=(110, 245, 178, 255))
-    d.text((82, 412), "Ваш ПК стал на 1 ГБ", font=font(SEGOE_B, 34),
-           fill=(214, 236, 227, 255))
-    d.text((82, 458), "медленнее. AGI уже близко.", font=font(SEGOE_B, 34),
-           fill=(214, 236, 227, 255))
-    d.text((84, 536), "— Сэм Альтман, CEO OpenAI", font=font(SEGOE_B, 24),
-           fill=(96, 210, 160, 255))
+    d.text((76, 172), "СПАСИБО", font=font(IMPACT, 104), fill=(112, 246, 180, 255))
+    d.text((76, 258), "ЗА ВКЛАД!", font=font(IMPACT, 104), fill=(112, 246, 180, 255))
+    d.text(
+        (78, 400),
+        "Ваш ПК стал на 1 ГБ",
+        font=font(SEGOE_B, 32),
+        fill=(214, 236, 227, 255),
+    )
+    d.text(
+        (78, 444),
+        "медленнее. AGI уже близко.",
+        font=font(SEGOE_B, 32),
+        fill=(214, 236, 227, 255),
+    )
+    d.text(
+        (80, 522),
+        "— Сэм Альтман, CEO OpenAI",
+        font=font(SEGOE_B, 23),
+        fill=(96, 210, 160, 255),
+    )
 
-    # bottom hairline (left half only) + vignette, then grain
-    d.rectangle((0, 646, 620, 648), fill=(40, 120, 92, 80))
-    img = noise_overlay(img.convert("RGB"), 5)
-    img = scanlines(img, 4, 20)
-    save(vignette(img, 2.2, 130), "thanks_wall.png", "RGB")
+    # нижняя линия только под текстом, чтобы не резать фигуру
+    d.rectangle((0, 636, 520, 638), fill=(40, 120, 92, 70))
+
+    img = noise_overlay(img.convert("RGB"), 3)
+    img = scanlines(img, 4, 9)
+    save(vignette(img, 2.2, 110), "thanks_wall.png", "RGB")
 
 
 # --------------------------------------------------------------------------
@@ -874,7 +949,12 @@ def make_fight_extras():
         a = math.pi / 3 * i
         pts.append((28 + math.cos(a) * 20, 28 + math.sin(a) * 20))
     d.polygon(pts, fill=(185, 200, 218, 255), outline=(95, 215, 255, 255))
-    d.ellipse((16, 16, 40, 40), fill=(110, 122, 138, 255), outline=(230, 240, 255, 255), width=2)
+    d.ellipse(
+        (16, 16, 40, 40),
+        fill=(110, 122, 138, 255),
+        outline=(230, 240, 255, 255),
+        width=2,
+    )
     d.line((20, 28, 36, 28), fill=(35, 42, 52, 255), width=4)
     d.line((28, 20, 28, 36), fill=(35, 42, 52, 255), width=4)
     add_glow(screw, (95, 215, 255, 200), 26, (28, 28), 0.5)
@@ -891,7 +971,9 @@ def make_fight_extras():
     # 4. Целевой маркер на полу (floor_marker.png)
     mk = Image.new("RGBA", (150, 38), (0, 0, 0, 0))
     d = ImageDraw.Draw(mk, "RGBA")
-    d.ellipse((4, 4, 146, 34), fill=(255, 60, 60, 75), outline=(255, 95, 95, 235), width=3)
+    d.ellipse(
+        (4, 4, 146, 34), fill=(255, 60, 60, 75), outline=(255, 95, 95, 235), width=3
+    )
     d.ellipse((28, 10, 122, 28), outline=(255, 215, 110, 210), width=2)
     save(mk, "floor_marker.png")
 
@@ -909,7 +991,9 @@ def make_fight_extras():
         y = 18 + i * 36
         d.rounded_rectangle((16, y, 94, y + 26), 4, fill=(38, 44, 52, 255))
         d.ellipse((76, y + 8, 86, y + 18), fill=(80, 255, 175, 255))
-    d.text((55, 115), "H100", font=font(IMPACT, 26), fill=(200, 255, 225, 255), anchor="mm")
+    d.text(
+        (55, 115), "H100", font=font(IMPACT, 26), fill=(200, 255, 225, 255), anchor="mm"
+    )
     save(mr, "mini_rack.png")
 
     # 6. Ауры фаз Сэма (aura_p1.png, aura_p2.png, aura_p3.png)

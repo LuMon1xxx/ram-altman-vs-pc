@@ -350,11 +350,21 @@ class Display:
             import ctypes
 
             u = ctypes.windll.user32
-            u.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                       ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                       ctypes.c_int, ctypes.c_uint]
-            u.SetLayeredWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_uint,
-                                                     ctypes.c_ubyte, ctypes.c_uint]
+            u.SetWindowPos.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            u.SetLayeredWindowAttributes.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint,
+                ctypes.c_ubyte,
+                ctypes.c_uint,
+            ]
             hwnd = pygame.display.get_wm_info().get("window")
             GWL_EXSTYLE, WS_EX_LAYERED = -20, 0x00080000
             LWA_COLORKEY = 0x1
@@ -686,9 +696,21 @@ class ThanksScreen:
         self.hint_a = 0.0
         self.bg = pygame.image.load(asset("thanks_wall.png")).convert()
         self.hold_bar = 0.0
+        self._cheer_done = False
+        try:
+            self.app.audio.music("ambient", 0.16)
+            self.app.audio.play("vo_yes", 1.0)
+        except Exception:
+            pass
 
     def update(self, dt, events):
         self.t += dt
+        if not self._cheer_done and self.t > 4.2:
+            self._cheer_done = True
+            try:
+                self.app.audio.play("crowd", 0.55)
+            except Exception:
+                pass
         keys = pygame.key.get_pressed()
         need = {pygame.K_a: "a", pygame.K_g: "g", pygame.K_i: "i"}
         active = {v for k, v in need.items() if keys[k]}
@@ -706,27 +728,32 @@ class ThanksScreen:
         c = self.app.display.canvas
         c.blit(self.bg, (0, 0))
         if self.hint_a > 0:
-            a = int(120 * self.hint_a)
+            a = int(230 * self.hint_a)
+            pill = pygame.Rect(24, CH - 66, 336, 40)
+            ov = pygame.Surface(pill.size, pygame.SRCALPHA)
+            pygame.draw.rect(ov, (6, 22, 17, int(200 * self.hint_a)), ov.get_rect(),
+                             border_radius=8)
+            pygame.draw.rect(ov, (44, 128, 96, int(190 * self.hint_a)), ov.get_rect(), 1,
+                             border_radius=8)
+            c.blit(ov, pill.topleft)
             text(
                 c,
                 "удерживайте  A + G + I,  чтобы закрыть",
                 15,
-                (26, 74, 56),
-                (CW // 2, CH - 30),
+                (150, 236, 196),
+                (pill.centerx, pill.centery),
                 anchor="center",
                 font="segoe",
                 alpha=a,
             )
             if self.hold_bar > 0:
-                w = 260
-                pygame.draw.rect(
-                    c, (16, 46, 34), (CW // 2 - w // 2, CH - 22, w, 4), border_radius=2
-                )
+                w = 336
+                pygame.draw.rect(c, (16, 46, 34), (24, CH - 20, w, 5), border_radius=3)
                 pygame.draw.rect(
                     c,
                     (70, 210, 150),
-                    (CW // 2 - w // 2, CH - 22, int(w * self.hold_bar), 4),
-                    border_radius=2,
+                    (24, CH - 20, int(w * self.hold_bar), 5),
+                    border_radius=3,
                 )
 
 
@@ -772,6 +799,7 @@ class FightScreen:
     LASER_TELEGRAPH = 0.90
     ORB_Y = 562
     ORB_SPEED = 450.0
+    ORB_MIN_GAP = 205.0
 
     def __init__(self, app, round_no=1, overlay=False, desktop=None):
         self.app = app
@@ -797,9 +825,13 @@ class FightScreen:
             self.dim.set_alpha(96)
 
         # Основные спрайты
-        self.pc_img = pygame.image.load(asset("pc.png")).convert_alpha()
+        _pi = pygame.image.load(asset("pc.png")).convert_alpha()
+        _ph = 300
+        self.pc_img = pygame.transform.smoothscale(
+            _pi, (int(_pi.get_width() * _ph / _pi.get_height()), _ph)
+        )
         _si = pygame.image.load(asset("sam_fight.png")).convert_alpha()
-        _sh = 384
+        _sh = 318
         self.sam_img = pygame.transform.smoothscale(
             _si, (int(_si.get_width() * _sh / _si.get_height()), _sh)
         )
@@ -810,7 +842,7 @@ class FightScreen:
         self.rack = pygame.image.load(asset("server_rack.png")).convert_alpha()
         self.rack = pygame.transform.smoothscale(
             self.rack,
-            (int(self.rack.get_width() * 0.84), int(self.rack.get_height() * 0.84)),
+            (int(self.rack.get_width() * 0.72), int(self.rack.get_height() * 0.72)),
         )
         self.coin = pygame.image.load(asset("coin20.png")).convert_alpha()
         self.chrome = pygame.image.load(asset("chrome_win.png")).convert_alpha()
@@ -1385,9 +1417,7 @@ class FightScreen:
 
         # ИИ Сэма
         speed_mult = (
-            1.0
-            if s["boss_phase"] == 1
-            else (1.28 if s["boss_phase"] == 2 else 1.55)
+            1.0 if s["boss_phase"] == 1 else (1.28 if s["boss_phase"] == 2 else 1.55)
         )
         s["atk_cd"] -= dt * speed_mult
         s["orb_cd"] -= dt
@@ -1429,6 +1459,10 @@ class FightScreen:
         for item in list(self.orb_queue):
             item["delay"] -= dt
             if item["delay"] <= 0:
+                # держим безопасный зазор: не выпускаем шар, пока предыдущий
+                # не отъехал достаточно далеко от левого края
+                if any(ob["x"] < self.ORB_MIN_GAP for ob in self.orbs):
+                    continue
                 self.orbs.append(
                     {
                         "x": -50.0,
@@ -1505,17 +1539,13 @@ class FightScreen:
             if pr["kind"] == "coin":
                 r = pygame.Rect(0, 0, 46, 46)
                 r.center = (int(pr["x"]), int(pr["y"]))
-                p_rect = pygame.Rect(
-                    int(p["x"] - 64), int(p["y"] - 290), 128, 290
-                )
+                p_rect = pygame.Rect(int(p["x"] - 64), int(p["y"] - 290), 128, 290)
                 if not pr["hit"] and r.colliderect(p_rect):
                     pr["hit"] = True
                     pr["dead"] = True
                     self.dmg("player", random.randint(8, 11), p["x"], p["y"] - 220)
                     self.app.audio.play("coin", 0.8)
-                    self.burst(
-                        pr["x"], pr["y"], 12, [(255, 220, 120), (80, 230, 160)]
-                    )
+                    self.burst(pr["x"], pr["y"], 12, [(255, 220, 120), (80, 230, 160)])
                     self.shake(5, 0.15)
 
             elif pr["kind"] == "screw":
@@ -1553,9 +1583,7 @@ class FightScreen:
                     pr["t"] = 0.0
                     self.app.audio.play("laser", 0.95)
                     if abs(p["x"] - pr["x"]) < 82 and p["y"] > self.FLOOR - 170:
-                        self.dmg(
-                            "player", random.randint(12, 16), p["x"], p["y"] - 230
-                        )
+                        self.dmg("player", random.randint(12, 16), p["x"], p["y"] - 230)
                         self.shake(9, 0.22)
                     else:
                         if random.random() < 0.5:
@@ -1720,10 +1748,10 @@ class FightScreen:
         for i in range(count):
             self.orb_queue.append({"delay": delay_acc, "speed": spd})
             # Иногда «двойной» шар с малым зазором
-            if i < count - 1 and random.random() < 0.38:
-                delay_acc += 0.36
+            if i < count - 1 and random.random() < 0.30:
+                delay_acc += 0.48
             else:
-                delay_acc += random.uniform(0.78, 1.05)
+                delay_acc += random.uniform(0.82, 1.08)
         self.say("Лови шары ChatGPT! Прыгай на W!", 1.7)
 
     def sam_melee(self):
@@ -1974,9 +2002,7 @@ class FightScreen:
                 self.flash = 1.0
                 self.flash_color = (255, 120, 90)
                 self.dmg("player", 55, p["x"], 320, big=True)
-                self.burst(
-                    p["x"], 520, 50, [(255, 200, 120), (255, 110, 70)], 700, 1.3
-                )
+                self.burst(p["x"], 520, 50, [(255, 200, 120), (255, 110, 70)], 700, 1.3)
                 self.say("Ха-ха-ха. Слабый компьютер.", 2.0)
                 self.app.audio.play("vo_laugh", 0.9)
         elif self.phase == "r2_miss":
@@ -2049,14 +2075,19 @@ class FightScreen:
         for i in range(170):
             a = int(150 * (i / 170) ** 1.6)
             pygame.draw.rect(s, (3, 6, 9, a), (0, 540 + i, CW, 1))
+        # мягкие световые пятна на полу под бойцами (эллипсы, а не купол)
         for cx, col in ((330, (70, 240, 200)), (970, (255, 190, 90))):
-            for r in range(300, 0, -10):
-                a = int(16 * (1 - r / 300) ** 1.5)
-                pygame.draw.circle(s, col + (a,), (cx, 560), r)
+            for k in range(6):
+                a = 6 + k * 2
+                rx = 215 - k * 28
+                ry = 24 - k * 3
+                pygame.draw.ellipse(
+                    s,
+                    col + (a,),
+                    (cx - rx, self.FLOOR - ry - 2, rx * 2, ry * 2 + 6),
+                )
         for w, a in ((22, 18), (12, 34), (5, 70), (2, 150)):
-            pygame.draw.line(
-                s, (80, 255, 175, a), (0, self.FLOOR), (CW, self.FLOOR), w
-            )
+            pygame.draw.line(s, (80, 255, 175, a), (0, self.FLOOR), (CW, self.FLOOR), w)
         pygame.draw.line(
             s, (255, 255, 255, 60), (0, self.FLOOR - 1), (CW, self.FLOOR - 1), 1
         )
@@ -2191,9 +2222,7 @@ class FightScreen:
         if sm["dead"]:
             if self.phase in ("r2_fatality", "r2_combo"):
                 off = (
-                    min(1.0, self.phase_t / 0.6)
-                    if self.phase == "r2_fatality"
-                    else 1.0
+                    min(1.0, self.phase_t / 0.6) if self.phase == "r2_fatality" else 1.0
                 )
                 ang = -80 * off
                 img = pygame.transform.rotate(img, ang)
@@ -2233,9 +2262,7 @@ class FightScreen:
             my = int(self.FLOOR + dy)
             s.blit(self.marker_img, self.marker_img.get_rect(center=(mx, my - 4)))
             if hz["state"] == "warn":
-                pygame.draw.line(
-                    s, (255, 90, 90, 110), (mx, 80), (mx, my - 10), 2
-                )
+                pygame.draw.line(s, (255, 90, 90, 110), (mx, 80), (mx, my - 10), 2)
             elif hz["state"] == "fall":
                 sp = self.dollar_img if hz["kind"] == "dollar" else self.mini_rack_img
                 s.blit(sp, sp.get_rect(midbottom=(mx, int(hz["y"] + dy))))
@@ -2325,9 +2352,7 @@ class FightScreen:
         p, sm = self.player, self.sam
         grad = pygame.Surface((CW, 155), pygame.SRCALPHA)
         for i in range(155):
-            pygame.draw.line(
-                grad, (4, 6, 9, int(185 * (1 - i / 155))), (0, i), (CW, i)
-            )
+            pygame.draw.line(grad, (4, 6, 9, int(185 * (1 - i / 155))), (0, i), (CW, i))
         c.blit(grad, (0, 0))
 
         text(
@@ -2363,7 +2388,9 @@ class FightScreen:
             c,
             "СЭМ АЛЬТМАН · %s" % phase_names.get(sm["boss_phase"], "ФАЗА 1"),
             28,
-            WHITE if sm["boss_phase"] == 1 else (CYAN if sm["boss_phase"] == 2 else RED),
+            WHITE
+            if sm["boss_phase"] == 1
+            else (CYAN if sm["boss_phase"] == 2 else RED),
             (CW - 150, 30),
             anchor="topright",
             font="impact",
@@ -3130,6 +3157,59 @@ def fake_desktop_surface():
     return None
 
 
+def minimize_desktop():
+    """Свернуть все окна пользователя, кроме своих: стол чистый перед боем."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        pid = os.getpid()
+        skip = {
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "Windows.UI.Core.CoreWindow",
+            "ForegroundStaging",
+        }
+        shell = u.GetShellWindow()
+        targets = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def cb(hwnd, _):
+            if hwnd == shell or not u.IsWindowVisible(hwnd):
+                return True
+            owner = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid:
+                return True
+            if u.GetWindowLongW(hwnd, -20) & 0x00000080:  # WS_EX_TOOLWINDOW
+                return True
+            buf = ctypes.create_unicode_buffer(256)
+            u.GetClassNameW(hwnd, buf, 256)
+            if buf.value in skip:
+                return True
+            targets.append(hwnd)
+            return True
+
+        u.EnumWindows(cb, 0)
+        for h in targets:
+            u.ShowWindow(h, 6)  # SW_MINIMIZE
+        print("minimized", len(targets), "windows")
+        return len(targets)
+    except Exception as e:
+        print("minimize failed:", e)
+        return 0
+
+
 def hide_window():
     try:
         import ctypes
@@ -3162,8 +3242,9 @@ class App:
     def play(self):
         try:
             pygame.mouse.set_visible(True)
-            self.display.toast_window("Служба оптимизации OpenAI AGI",
-                                      TOAST_W, TOAST_H, TOAST_KEY)
+            self.display.toast_window(
+                "Служба оптимизации OpenAI AGI", TOAST_W, TOAST_H, TOAST_KEY
+            )
             toast = ToastScreen(self)
             while not toast.done:
                 dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
@@ -3181,7 +3262,8 @@ class App:
                 return
 
             hide_window()
-            time.sleep(0.25)
+            minimize_desktop()
+            time.sleep(0.6)
             desktop = grab_desktop_surface()
             self.display.go_overlay("RAM Altman vs PC")
             fight = FightScreen(self, 1, overlay=True, desktop=desktop)
@@ -3593,8 +3675,9 @@ def selftest():
             pass
         try:
             os.makedirs(local_dir(), exist_ok=True)
-            with open(os.path.join(local_dir(), "selftest.log"), "w",
-                      encoding="utf-8") as f:
+            with open(
+                os.path.join(local_dir(), "selftest.log"), "w", encoding="utf-8"
+            ) as f:
                 f.write("\n".join(lines))
         except Exception:
             pass
@@ -3653,7 +3736,9 @@ def shots():
         pygame.image.save(app.display.canvas, os.path.join(out, name + ".png"))
         print("shot:", name)
 
-    app.display.toast_window("Служба оптимизации OpenAI AGI", TOAST_W, TOAST_H, TOAST_KEY)
+    app.display.toast_window(
+        "Служба оптимизации OpenAI AGI", TOAST_W, TOAST_H, TOAST_KEY
+    )
     toast = ToastScreen(app)
     for w in (0.2, 1.0, 2.2):
         while toast.t < w:

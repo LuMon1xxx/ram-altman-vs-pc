@@ -4,7 +4,7 @@ import os
 import random
 import sys
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_assets as B  # noqa: E402
@@ -12,27 +12,33 @@ import build_assets as B  # noqa: E402
 
 def make_fake_desktop():
     W, H = B.W, B.H
-    img = B.vgrad((W, H), (18, 52, 110), (6, 16, 42)).convert("RGBA")
+    img = B.vgrad((W, H), (12, 34, 74), (3, 8, 22)).convert("RGBA")
+
+    # светящееся «дыхание» виндовс-11: крупные размытые пятна без резких дуг
     for cx, cy, r, col in (
-        (300, 260, 420, (30, 90, 220, 90)),
-        (760, 180, 360, (70, 170, 255, 70)),
-        (1050, 420, 420, (20, 60, 160, 80)),
-        (520, 620, 380, (120, 60, 200, 55)),
+        (380, 220, 520, (40, 120, 255, 120)),
+        (860, 130, 460, (90, 195, 255, 95)),
+        (1080, 470, 470, (26, 70, 190, 100)),
+        (430, 640, 520, (120, 70, 210, 70)),
     ):
         B.add_glow(img, col, r, (cx, cy), 1.0)
-    # abstract "bloom" ribbons
-    d = ImageDraw.Draw(img, "RGBA")
-    for i in range(7):
-        d.arc(
-            (250 + i * 18, 90 + i * 12, 1030 - i * 14, 700 - i * 10),
-            200,
-            340,
-            fill=(120, 200, 255, 26),
-            width=26,
-        )
-    img = img.filter(ImageFilter.GaussianBlur(0.6))
 
-    # desktop icons
+    # тонкая лента-«цветок», сильно размытая — читается как обои, а не как фигура
+    ribbon = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    rd = ImageDraw.Draw(ribbon)
+    for i in range(5):
+        rd.ellipse(
+            (300 + i * 26, 150 + i * 22, 900 - i * 18, 640 - i * 16),
+            outline=(160, 220, 255, 26),
+            width=14,
+        )
+    ribbon = ribbon.filter(ImageFilter.GaussianBlur(26))
+    img.alpha_composite(ribbon)
+
+    img = img.filter(ImageFilter.GaussianBlur(1.2))
+
+    # иконки рабочего стола
+    d = ImageDraw.Draw(img, "RGBA")
     f = B.font(B.SEGOE_B, 13)
     icons = [
         ("Этот компьютер", (255, 230, 140)),
@@ -49,33 +55,34 @@ def make_fake_desktop():
             (x, y, x + 52, y + 52),
             10,
             fill=(22, 34, 58, 220),
-            outline=(130, 160, 200, 120),
+            outline=(130, 160, 200, 110),
             width=1,
         )
         d.rounded_rectangle((x + 14, y + 12, x + 38, y + 40), 3, fill=col + (235,))
         d.text((x + 26, y + 76), label, font=f, fill=(240, 246, 255, 235), anchor="ma")
 
-    # taskbar
-    d.rectangle((0, H - 48, W, H), fill=(12, 18, 30, 235))
+    # панель задач
+    d.rectangle((0, H - 48, W, H), fill=(10, 16, 28, 235))
     cx = W // 2
     for i in range(5):
         bx = cx - 190 + i * 76
-        d.rounded_rectangle((bx, H - 42, bx + 44, H - 8), 6, fill=(38, 52, 76, 240))
-        d.ellipse((bx + 12, H - 34, bx + 32, H - 14), fill=(120, 190, 255, 220))
+        d.rounded_rectangle((bx, H - 42, bx + 44, H - 8), 6, fill=(34, 48, 72, 240))
+        d.ellipse((bx + 12, H - 34, bx + 32, H - 14), fill=(120, 190, 255, 215))
     d.text(
-        (W - 90, H - 24),
+        (W - 90, H - 26),
         "12:04",
         font=B.font(B.SEGOE_B, 13),
         fill=(226, 236, 250),
         anchor="mm",
     )
     d.text(
-        (W - 90, H - 10),
+        (W - 90, H - 11),
         "08.11.2026",
         font=B.font(B.SEGOE_B, 10),
         fill=(190, 205, 225),
         anchor="mm",
     )
+
     B.save(img.convert("RGB"), "fake_desktop.png")
 
 
