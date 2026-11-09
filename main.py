@@ -313,6 +313,8 @@ class Display:
         self.canvas = pygame.Surface((CW, CH))
         self.fullscreen = False
         self.title = ""
+        self.cover = False
+        self.cover_blue = False
 
     def _new_mode(self, size, flags, title):
         if self.screen is not None:
@@ -327,11 +329,16 @@ class Display:
     def windowed(self, size, title):
         self._new_mode(size, 0, title)
         self.fullscreen = False
+        self.cover = False
+        self.cover_blue = False
         pygame.mouse.set_visible(True)
 
-    def go_fullscreen(self, title):
+    def go_fullscreen(self, title, cover_blue=True):
         self._new_mode((0, 0), pygame.FULLSCREEN, title)
         self.fullscreen = True
+        # Настоящий BSOD заполняет экран целиком, без чёрных полей по краям
+        self.cover = True
+        self.cover_blue = cover_blue
         pygame.mouse.set_visible(False)
 
     def toast_window(self, title, w, h, key=(255, 0, 255)):
@@ -380,6 +387,8 @@ class Display:
 
     def go_overlay(self, title):
         """Borderless, always-on-top window sized to the game's 16:9 frame."""
+        self.cover = False
+        self.cover_blue = False
         sw, sh = screen_size()
         scale = min(sw / CW, sh / CH)
         w, h = max(2, int(CW * scale)), max(2, int(CH * scale))
@@ -401,6 +410,15 @@ class Display:
             return
         w, h = self.screen.get_size()
         cw, ch = self.canvas.get_size()
+        if getattr(self, "cover", False):
+            # Заполняем экран целиком (синий экран смерти без чёрных полей)
+            scale = max(w / cw, h / ch)
+            dst = (max(1, int(cw * scale)), max(1, int(ch * scale)))
+            scaled = pygame.transform.smoothscale(self.canvas, dst)
+            self.screen.fill((0, 120, 215) if self.cover_blue else (0, 0, 0))
+            self.screen.blit(scaled, ((w - dst[0]) // 2, (h - dst[1]) // 2))
+            pygame.display.flip()
+            return
         scale = min(w / cw, h / ch)
         dst = (max(1, int(cw * scale)), max(1, int(ch * scale)))
         if dst == (cw, ch):
@@ -2806,144 +2824,177 @@ class FightScreen:
 # BSOD
 # --------------------------------------------------------------------------
 class BSODScreen:
+    """Настоящий синий экран Windows 11: только текст, QR и счётчик.
+
+    Никаких подсказок на экране нет. Реванш вызывается удержанием A + G + I.
+    """
+
     BLUE = (0, 120, 215)
+    WHITE = (255, 255, 255)
+    HOLD = 0.4
 
     def __init__(self, app):
         self.app = app
         self.t = 0.0
         self.done = False
         self.result = None
-        self.start = time.time()
-        self.qr = self.make_qr()
-        self.app.audio.stop_music(300)
-        self.app.audio.play("bsod", 0.7)
+        self.hold_t = 0.0
+        self.qr = self.make_qr(112)
+        self.app.audio.stop_music(200)
+        self.app.audio.play("bsod", 0.35)
 
-    def make_qr(self):
-        s = pygame.Surface((92, 92))
-        s.fill((255, 255, 255))
-        rnd = random.Random(42)
-        cell = 7
-        for y in range(0, 13):
-            for x in range(0, 13):
-                if rnd.random() < 0.45:
-                    pygame.draw.rect(
-                        s, (0, 0, 0), (x * cell + 2, y * cell + 2, cell, cell)
-                    )
-        for ox, oy in ((0, 0), (9, 0), (0, 9)):
+    # -- QR -----------------------------------------------------------------
+    def make_qr(self, size):
+        """Псевдо-QR: три маркера, тайминг-полосы, шум. Выглядит как настоящий."""
+        s = pygame.Surface((size, size))
+        s.fill(self.WHITE)
+        rnd = random.Random(2024)
+        n = 29
+        cell = size / float(n)
+        quiet = 0
+
+        def mod(x, y):
+            r = pygame.Rect(
+                quiet + int(x * cell),
+                quiet + int(y * cell),
+                int(cell) + 1,
+                int(cell) + 1,
+            )
+            pygame.draw.rect(s, (0, 0, 0), r)
+
+        # три квадрата-маркера
+        for ox, oy in ((0, 0), (n - 7, 0), (0, n - 7)):
             pygame.draw.rect(
-                s, (0, 0, 0), (ox * cell + 2, oy * cell + 2, 5 * cell, 5 * cell)
+                s,
+                (0, 0, 0),
+                (int(ox * cell), int(oy * cell), int(7 * cell), int(7 * cell)),
             )
             pygame.draw.rect(
-                s, (255, 255, 255), (ox * cell + 3, oy * cell + 3, 3 * cell, 3 * cell)
+                s,
+                self.WHITE,
+                (
+                    int((ox + 1) * cell),
+                    int((oy + 1) * cell),
+                    int(5 * cell),
+                    int(5 * cell),
+                ),
             )
             pygame.draw.rect(
-                s, (0, 0, 0), (ox * cell + 4, oy * cell + 4, 3 * cell - 2, 3 * cell - 2)
+                s,
+                (0, 0, 0),
+                (
+                    int((ox + 2) * cell),
+                    int((oy + 2) * cell),
+                    int(3 * cell),
+                    int(3 * cell),
+                ),
             )
+        # тайминг-полосы
+        for i in range(8, n - 8):
+            if i % 2 == 0:
+                mod(i, 6)
+                mod(6, i)
+        # данные
+        for y in range(8, n):
+            for x in range(8, n):
+                if rnd.random() < 0.47:
+                    mod(x, y)
+        for y in range(0, 8):
+            for x in range(8, n - 8):
+                if rnd.random() < 0.5:
+                    mod(x, y)
         return s
 
+    # -- update -------------------------------------------------------------
     def update(self, dt, events):
         self.t += dt
-        for e in events:
-            if e.type == pygame.KEYDOWN and e.key in (pygame.K_SPACE, pygame.K_RETURN):
-                if self.t > 0.4:
-                    self.result = "rematch"
-                    self.done = True
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_a] and keys[pygame.K_g] and keys[pygame.K_i]:
+            self.hold_t += dt
+            if self.hold_t >= self.HOLD:
+                self.result = "rematch"
+                self.done = True
+        else:
+            self.hold_t = 0.0
 
+    # -- draw ---------------------------------------------------------------
     def draw(self):
         c = self.app.display.canvas
         c.fill(self.BLUE)
-        text(c, ":(", 120, (255, 255, 255), (108, 46), font="segoe")
-        y = 196
+
+        # Отступы как в настоящем BSOD: левое поле ~11.7 % ширины,
+        # сверху крупный смайлик, ниже — абзац мелким Segoe UI Light.
+        left = 142
+        # «:(» как на настоящем экране: двоеточие и скобка стоят вплотную
+        text(c, ":", 104, self.WHITE, (left + 2, 78), font="segoel")
+        text(c, "(", 118, self.WHITE, (left + 30, 52), font="segoel")
+
+        y = 214
+        f_body = 25
+        lh = 36
+        para1 = (
+            "На вашем ПК возникла проблема, и его необходимо перезагрузить. "
+            "Мы собираем некоторые сведения об ошибке, затем выполним "
+            "перезагрузку автоматически."
+        )
+        y = draw_para(c, para1, f_body, self.WHITE, left, y, 1010, lh, font="segoel")
+
+        y += 30
+        para2 = (
+            "1 ГБ вашей оперативной памяти был успешно выпаян агентом OpenAI "
+            "и отправлен экспресс-доставкой в дата-центр Сан-Франциско. "
+            "Сбор пожертвований на AGI: 100 % завершено."
+        )
+        y = draw_para(c, para2, f_body, self.WHITE, left, y, 1010, lh, font="segoel")
+
+        # счётчик «N % завершено», как на настоящем экране
+        y += 44
+        pct = min(100, int(max(0.0, self.t - 0.6) * 11))
+        text(c, "%d %% завершено" % pct, 25, self.WHITE, (left, y), font="segoel")
+
+        # нижний блок: QR + служебная информация
+        qy = CH - 154
+        c.blit(self.qr, (left, qy))
+        qs = self.qr.get_width()
+        tx = left + qs + 26
         text(
             c,
-            "На вашем ПК возникла проблема: Сэм Альтман победил в честном поединке.",
-            30,
-            (255, 255, 255),
-            (112, y),
-            font="segoe",
-        )
-        y += 58
-        text(
-            c,
-            "1 ГБ вашей оперативной памяти был успешно выпаян агентом OpenAI",
-            24,
-            (255, 255, 255),
-            (112, y),
+            "Дополнительные сведения и возможные способы решения:",
+            16,
+            (238, 243, 250),
+            (tx, qy + 6),
             font="segoe",
         )
         text(
             c,
-            "и отправлен экспресс-доставкой в дата-центр Сан-Франциско.",
-            24,
-            (255, 255, 255),
-            (112, y + 32),
+            "https://www.windows.com/stopcode",
+            16,
+            (238, 243, 250),
+            (tx, qy + 30),
             font="segoe",
         )
-        y += 92
         text(
             c,
-            "Сбор пожертвований на AGI: 100% завершено.",
-            24,
-            (255, 255, 255),
-            (112, y),
+            "Если вы обратитесь в службу поддержки, сообщите следующие сведения:",
+            16,
+            (238, 243, 250),
+            (tx, qy + 66),
             font="segoe",
         )
-        y += 70
         text(
             c,
             "Код остановки: CRITICAL_RAM_DEFICIT",
-            22,
-            (255, 255, 255),
-            (112, y),
+            16,
+            self.WHITE,
+            (tx, qy + 90),
             font="segoe",
         )
-        y += 34
         text(
             c,
             "Что вызвало проблему: SamAltman_SolderingIron.sys",
-            22,
-            (255, 255, 255),
-            (112, y),
-            font="segoe",
-        )
-
-        c.blit(self.qr, (112, CH - 190))
-        text(
-            c,
-            "Для получения дополнительной информации посетите",
             15,
-            (235, 240, 250),
-            (216, CH - 188),
-            font="segoe",
-        )
-        text(
-            c,
-            "openai.com/agi-datacenter",
-            15,
-            (235, 240, 250),
-            (216, CH - 168),
-            font="segoe",
-        )
-
-        blink = 0.5 + 0.5 * math.sin(self.t * 4.0)
-        btn = pygame.Rect(CW // 2 - 430, CH - 116, 860, 52)
-        pygame.draw.rect(c, (255, 255, 255), btn, 2, border_radius=6)
-        text(
-            c,
-            "[ НАЖМИТЕ ПРОБЕЛ, ЧТОБЫ ВЫЗВАТЬ СЭМА НА РЕВАНШ ]",
-            20,
-            (255, 240, int(150 + 100 * blink)),
-            btn.center,
-            anchor="center",
-            font="consolab",
-        )
-        text(
-            c,
-            "и отбить свою ОЗУ",
-            15,
-            (225, 232, 245),
-            (btn.centerx, btn.bottom + 8),
-            anchor="midtop",
+            (232, 238, 248),
+            (tx, qy + 112),
             font="segoe",
         )
 
@@ -3276,8 +3327,10 @@ class App:
             if self.run_screen(fight) != "lost":
                 return
             bsod = BSODScreen(self)
+            self.display.go_fullscreen("")
             if self.run_screen(bsod) != "rematch":
                 return
+            self.display.go_overlay("RAM Altman vs PC")
             fight2 = FightScreen(self, 2, overlay=True, desktop=desktop)
             if self.run_screen(fight2) != "won":
                 return
