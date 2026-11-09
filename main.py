@@ -386,33 +386,24 @@ class Display:
             print("layered window failed:", e)
 
     def go_overlay(self, title):
-        """Безрамочное окно на весь экран поверх панели задач."""
-        self.cover = False
-        self.cover_blue = False
-        sw, sh = screen_size()
-        try:
-            os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
-        except Exception:
-            pass
-        self._new_mode((sw, sh), pygame.NOFRAME, title)
-        self.fullscreen = True
-        try:
-            import ctypes
+        """Полноэкранный режим: арена ложится на снимок рабочего стола.
 
-            u = ctypes.windll.user32
-            hwnd = pygame.display.get_wm_info().get("window")
-            u.SetWindowPos.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint,
-            ]
-            u.SetWindowPos(hwnd, -1, 0, 0, sw, sh, 0x0001 | 0x0002 | 0x0004 | 0x0010)
-            hide_taskbar()
+        Раньше это было безрамочное окно, но панель задач в Win11 всё равно
+        всплывала поверх. Настоящий fullscreen перекрывает её железно.
+        """
+        sw, sh = screen_size()
+        self._new_mode((0, 0), pygame.FULLSCREEN, title)
+        self.fullscreen = True
+        self.cover = True
+        self.cover_blue = False
+        try:
+            # Сначала забираем фокус: смена фокуса заставляет Explorer
+            # показать панель задач заново, поэтому прячем её уже после.
             force_foreground()
+            time.sleep(0.15)
+            hide_taskbar()
+            time.sleep(0.05)
+            hide_taskbar()
         except Exception:
             pass
         pygame.mouse.set_visible(True)
@@ -3245,6 +3236,9 @@ def minimize_desktop():
 GUARD = {"on": False}
 
 
+TRAY_STATE = {}
+
+
 def _tray_hwnds():
     import ctypes
 
@@ -3258,13 +3252,17 @@ def _tray_hwnds():
 
 
 def hide_taskbar():
+    """Прячем панель задач. Окно панели не двигаем: перенос заставляет
+    Explorer открыть меню «Пуск»."""
     try:
         import ctypes
 
+        u = ctypes.windll.user32
         for h in _tray_hwnds():
-            ctypes.windll.user32.ShowWindow(h, 0)
+            u.ShowWindow(h, 0)  # SW_HIDE
         return True
-    except Exception:
+    except Exception as e:
+        print("hide_taskbar failed:", e)
         return False
 
 
@@ -3272,10 +3270,13 @@ def show_taskbar():
     try:
         import ctypes
 
+        u = ctypes.windll.user32
         for h in _tray_hwnds():
-            ctypes.windll.user32.ShowWindow(h, 5)
+            u.ShowWindow(h, 5)  # SW_SHOW
+        TRAY_STATE.clear()
         return True
-    except Exception:
+    except Exception as e:
+        print("show_taskbar failed:", e)
         return False
 
 
@@ -3409,8 +3410,9 @@ class SystemGuard:
         except Exception as e:
             print("guard hook failed:", e)
             self.active = False
-        hide_taskbar()
         force_foreground()
+        time.sleep(0.12)
+        hide_taskbar()
         GUARD["on"] = True
         return self.active
 
@@ -3441,10 +3443,24 @@ class SystemGuard:
                 u.ShowWindow(hwnd, 9)  # SW_RESTORE
             if u.GetForegroundWindow() != hwnd:
                 force_foreground()
-            if ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None):
-                if u.IsWindowVisible(u.FindWindowW("Shell_TrayWnd", None)):
-                    hide_taskbar()
+            tray = u.FindWindowW("Shell_TrayWnd", None)
             sw, sh = screen_size()
+            if tray and u.IsWindowVisible(tray):
+                hide_taskbar()
+            if os.environ.get("RAM_DEBUG_WIN"):
+                self._dbg_n = getattr(self, "_dbg_n", 0) + 1
+                if self._dbg_n % 60 == 0:
+                    r = ctypes.RECT()
+                    u.GetWindowRect.argtypes = [ctypes.c_void_p,
+                                                ctypes.POINTER(ctypes.RECT)]
+                    u.GetWindowRect(hwnd, ctypes.byref(r))
+                    tr = ctypes.RECT()
+                    if tray:
+                        u.GetWindowRect(tray, ctypes.byref(tr))
+                    print("DBG win=%s rect=%d,%d %dx%d fg=%s trayVis=%s trayTop=%s"
+                          % (hwnd, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                             u.GetForegroundWindow(), bool(tray and u.IsWindowVisible(tray)),
+                             tr.top if tray else "-"), flush=True)
             u.SetWindowPos.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -3457,6 +3473,138 @@ class SystemGuard:
             u.SetWindowPos(hwnd, -1, 0, 0, sw, sh, 0x0001 | 0x0004 | 0x0010)
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------
+# Обои рабочего стола: мем на время пранка, потом возвращаем прежние
+# --------------------------------------------------------------------------
+def read_wallpaper_state():
+    """Запоминаем текущие обои и их режим, чтобы потом восстановить."""
+    import winreg
+
+    state = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as k:
+            for name in ("Wallpaper", "WallpaperStyle", "TileWallpaper"):
+                try:
+                    state[name] = winreg.QueryValueEx(k, name)[0]
+                except FileNotFoundError:
+                    state[name] = None
+    except Exception as e:
+        print("wallpaper state failed:", e)
+    return state
+
+
+def apply_wallpaper_image(path):
+    """Ставит картинку обоями через SystemParametersInfo."""
+    try:
+        import ctypes
+
+        u = ctypes.windll.user32
+        u.SystemParametersInfoW.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+        ]
+        u.SystemParametersInfoW.restype = ctypes.c_int
+        # SPI_SETDESKWALLPAPER = 20, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE = 3
+        return bool(u.SystemParametersInfoW(20, 0, path, 3))
+    except Exception as e:
+        print("set wallpaper failed:", e)
+        return False
+
+
+def restore_wallpaper(state):
+    """Возвращает обои, которые были до пранка."""
+    import winreg
+
+    path = (state or {}).get("Wallpaper")
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE
+        ) as k:
+            for name in ("WallpaperStyle", "TileWallpaper"):
+                value = (state or {}).get(name)
+                if value:
+                    winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+            winreg.SetValueEx(k, "Wallpaper", 0, winreg.REG_SZ, path)
+    except Exception:
+        pass
+    return apply_wallpaper_image(path)
+
+
+def wall_backup_path():
+    return os.path.join(local_dir(), "wall_backup.json")
+
+
+def save_wall_backup(state):
+    try:
+        import json
+
+        with open(wall_backup_path(), "w", encoding="utf-8") as f:
+            json.dump(state or {}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def clear_wall_backup():
+    try:
+        os.remove(wall_backup_path())
+    except Exception:
+        pass
+
+
+def restore_leftover_wallpaper():
+    """Если прошлый запуск упал с мемом на обоях — вернуть родные."""
+    try:
+        import json
+
+        cur = read_wallpaper_state().get("Wallpaper") or ""
+        if "meme_wall_" not in os.path.basename(cur):
+            return False
+        with open(wall_backup_path(), encoding="utf-8") as f:
+            state = json.load(f)
+        ok = restore_wallpaper(state)
+        if ok:
+            clear_wall_backup()
+        print("restored leftover wallpaper:", ok)
+        return ok
+    except Exception:
+        return False
+
+
+def meme_wallpaper_path():
+    """Собирает обои с мемом под текущее разрешение и кеширует их."""
+    try:
+        from PIL import Image
+
+        dpi_aware()  # иначе GetSystemMetrics вернёт масштабированный размер
+        sw, sh = screen_size()
+        out = os.path.join(local_dir(), "meme_wall_%dx%d.png" % (sw, sh))
+        src = asset("meme_src.png")
+        if os.path.exists(out) and os.path.exists(src):
+            if os.path.getmtime(out) >= os.path.getmtime(src):
+                return out
+        if not os.path.exists(src):
+            return None
+        im = Image.open(src).convert("RGB")
+        # фон — тот же белый, что и у мема, чтобы шов не читался
+        bg = Image.new("RGB", (sw, sh), (255, 255, 255))
+        th = int(sh * 0.90)
+        tw = int(im.width * th / im.height)
+        if tw > sw * 0.92:
+            tw = int(sw * 0.92)
+            th = int(im.height * tw / im.width)
+        im = im.resize((tw, th), Image.LANCZOS)
+        bg.paste(im, ((sw - tw) // 2, (sh - th) // 2))
+        bg.save(out, "PNG")
+        return out
+    except Exception as e:
+        print("meme wallpaper failed:", e)
+        return None
 
 
 def hide_window():
@@ -3488,12 +3636,14 @@ class App:
             tick += 1
             if tick % 20 == 0:
                 self.guard.keep_on_top()
-            if getattr(screen, "done", False):
-                return None
+            # result важнее done: BSOD выставляет оба поля
             if getattr(screen, "result", None):
                 return screen.result
+            if getattr(screen, "done", False):
+                return None
 
     def play(self):
+        saved_wall = None
         try:
             pygame.mouse.set_visible(True)
             self.display.toast_window(
@@ -3515,6 +3665,15 @@ class App:
                 return
             if toast.result != "no":
                 return
+
+            # Мем вместо обоев — до снятия скриншота рабочего стола,
+            # чтобы арена легла ровно на него. Вернём в finally.
+            restore_leftover_wallpaper()
+            saved_wall = read_wallpaper_state()
+            save_wall_backup(saved_wall)
+            meme = meme_wallpaper_path()
+            if meme and apply_wallpaper_image(meme):
+                time.sleep(0.6)
 
             hide_window()
             minimize_desktop()
@@ -3540,6 +3699,8 @@ class App:
             pass
         finally:
             self.guard.stop()
+            if saved_wall and restore_wallpaper(saved_wall):
+                clear_wall_backup()
             self.app_audio_stop()
             try:
                 pygame.mixer.quit()
