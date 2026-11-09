@@ -731,10 +731,16 @@ class ThanksScreen:
             a = int(230 * self.hint_a)
             pill = pygame.Rect(24, CH - 66, 336, 40)
             ov = pygame.Surface(pill.size, pygame.SRCALPHA)
-            pygame.draw.rect(ov, (6, 22, 17, int(200 * self.hint_a)), ov.get_rect(),
-                             border_radius=8)
-            pygame.draw.rect(ov, (44, 128, 96, int(190 * self.hint_a)), ov.get_rect(), 1,
-                             border_radius=8)
+            pygame.draw.rect(
+                ov, (6, 22, 17, int(200 * self.hint_a)), ov.get_rect(), border_radius=8
+            )
+            pygame.draw.rect(
+                ov,
+                (44, 128, 96, int(190 * self.hint_a)),
+                ov.get_rect(),
+                1,
+                border_radius=8,
+            )
             c.blit(ov, pill.topleft)
             text(
                 c,
@@ -799,7 +805,9 @@ class FightScreen:
     LASER_TELEGRAPH = 0.90
     ORB_Y = 562
     ORB_SPEED = 450.0
-    ORB_MIN_GAP = 205.0
+    # Между шарами должно влезать три системных блока: 3 * 271 px (ширина
+    # спрайта ПК) + 92 px диаметра шара = 905 px между центрами.
+    ORB_MIN_GAP = 905.0
 
     def __init__(self, app, round_no=1, overlay=False, desktop=None):
         self.app = app
@@ -1747,11 +1755,9 @@ class FightScreen:
         delay_acc = 0.15
         for i in range(count):
             self.orb_queue.append({"delay": delay_acc, "speed": spd})
-            # Иногда «двойной» шар с малым зазором
-            if i < count - 1 and random.random() < 0.30:
-                delay_acc += 0.48
-            else:
-                delay_acc += random.uniform(0.82, 1.08)
+            # Зазор задаёт ORB_MIN_GAP, поэтому очередь только «просит» шары —
+            # фактический ритм держит проверка дистанции при спавне.
+            delay_acc += random.uniform(0.90, 1.20)
         self.say("Лови шары ChatGPT! Прыгай на W!", 1.7)
 
     def sam_melee(self):
