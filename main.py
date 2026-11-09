@@ -2833,6 +2833,294 @@ class FightScreen:
 # --------------------------------------------------------------------------
 # BSOD
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# CRASH — игра «свернулась», экран завалило ошибками и сломанными плюсами
+# --------------------------------------------------------------------------
+PLUS_COLORS = (
+    (255, 70, 140), (70, 220, 255), (255, 210, 70),
+    (140, 255, 130), (200, 130, 255), (255, 140, 60),
+)
+
+
+def make_broken_plus(size, color, kind, arm=0, direction=1):
+    """«Сломанный» плюс — знак, что всё пошло не по плану.
+
+    kind:
+      bent    — один конец загнут под 90°, будто знак погнулся;
+      cracked — плюс расколот зигзагом через центр;
+      crossed — плюс перечёркнут по диагонали (в UI это «недоступно»).
+    """
+    s = pygame.Surface((size, size), pygame.SRCALPHA)
+    t = max(6, int(size * 0.26))
+    c = size // 2
+    half = t // 2
+    ln = int(size * 0.34)
+
+    def bar(rect):
+        pygame.draw.rect(s, color, rect)
+
+    bar((0, c - half, size, t))
+    bar((c - half, 0, t, size))
+
+    if kind == "bent":
+        if arm == 0:
+            x = c - half if direction > 0 else c - half - ln
+            bar((x, 0, ln, t))
+        elif arm == 1:
+            x = c - half if direction > 0 else c - half - ln
+            bar((x, size - t, ln, t))
+        elif arm == 2:
+            y = c - half if direction > 0 else c - half - ln
+            bar((size - t, y, t, ln))
+        else:
+            y = c - half if direction > 0 else c - half - ln
+            bar((0, y, t, ln))
+
+    elif kind == "cracked":
+        # вырезаем зигзаг по центру — фигура распадается на два обломка
+        pts = []
+        steps = 7
+        for i in range(steps + 1):
+            y = -2 + (size + 4) * i / steps
+            x = c + (size * 0.07 if i % 2 else -size * 0.07)
+            pts.append((x, y))
+        wide = max(5, int(size * 0.13))
+        for i in range(steps):
+            pygame.draw.line(s, (0, 0, 0, 0), pts[i], pts[i + 1], wide)
+
+    else:  # crossed
+        pygame.draw.line(s, (0, 0, 0, 0), (0, 0), (size, size), max(6, size // 12))
+        pygame.draw.line(s, (color[0] // 3, color[1] // 3, color[2] // 3, 255),
+                         (0, 0), (size, size), max(3, size // 22))
+    return s
+
+
+def make_shards(size, color, n=5):
+    """Осколки, которые летят следом за сломанным плюсом."""
+    out = []
+    for _ in range(n):
+        w = random.randint(4, max(5, size // 6))
+        h = random.randint(4, max(5, size // 5))
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        s.fill(color + (random.randint(150, 240),))
+        out.append(s)
+    return out
+
+
+ERRORS = (
+    ("outofmemory.exe",
+     "Не удалось выделить 4096 МБ оперативной памяти.\nСвободно: 12 ГБ."),
+    ("Служба выпайки ОЗУ",
+     "Обнаружена потеря памяти: −4096 МБ.\nПродолжить работу невозможно."),
+    ("chrome.exe",
+     "Недостаточно ОЗУ для новой вкладки.\nЗакройте 4096 вкладок."),
+    ("SamAltman_SolderingIron.exe",
+     "Приложение не отвечает.\nЗавершить процесс?"),
+    ("word.exe",
+     "Документ «Тест_ОЗУ.docx» не сохранён.\nПамять освобождена принудительно."),
+    ("Windows",
+     "ОЗУ: 16 ГБ → 0 ГБ.\nСистема будет перезагружена."),
+)
+
+
+def draw_error_dialog(c, rect, title, text, alpha=255, hover=False):
+    """Диалог в духе классического MessageBox Windows 10."""
+    shadow = pygame.Surface((rect.w + 16, rect.h + 18), pygame.SRCALPHA)
+    pygame.draw.rect(shadow, (0, 0, 0, 90), (10, 12, rect.w, rect.h), border_radius=6)
+    shadow.set_alpha(alpha)
+    c.blit(shadow, (rect.x - 6, rect.y - 4))
+
+    body = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    pygame.draw.rect(body, (243, 243, 243, 255), body.get_rect(), border_radius=5)
+    pygame.draw.rect(body, (255, 255, 255, 255),
+                     (1, 1, rect.w - 2, 28), border_top_left_radius=5,
+                     border_top_right_radius=5)
+    pygame.draw.rect(body, (138, 138, 138, 255), body.get_rect(), 1, border_radius=5)
+    pygame.draw.line(body, (208, 208, 208, 255), (1, 30), (rect.w - 2, 30))
+
+    # заголовок и крестик
+    f_title = get_font("segoe", 14)
+    body.blit(f_title.render(title, True, (28, 28, 28)), (12, 8))
+    cx = rect.w - 20
+    pygame.draw.line(body, (110, 110, 110), (cx - 5, 15), (cx + 5, 25), 2)
+    pygame.draw.line(body, (110, 110, 110), (cx - 5, 25), (cx + 5, 15), 2)
+
+    # иконка ошибки
+    ic = 34
+    ix, iy = 24, 66
+    pygame.draw.circle(body, (211, 47, 47), (ix + ic // 2, iy + ic // 2), ic // 2)
+    pygame.draw.line(body, (255, 255, 255), (ix + 11, iy + 11), (ix + 23, iy + 23), 4)
+    pygame.draw.line(body, (255, 255, 255), (ix + 11, iy + 23), (ix + 23, iy + 11), 4)
+
+    # текст
+    ty = iy
+    for line in text.split("\n"):
+        body.blit(get_font("segoe", 15).render(line, True, (30, 30, 30)), (ix + ic + 18, ty))
+        ty += 24
+
+    # кнопка OK
+    btn = pygame.Rect(rect.w - 108, rect.h - 44, 88, 30)
+    pygame.draw.rect(body, (225, 225, 225) if hover else (237, 237, 237), btn,
+                     border_radius=4)
+    pygame.draw.rect(body, (150, 150, 150), btn, 1, border_radius=4)
+    ok = get_font("segoe", 15).render("ОК", True, (32, 32, 32))
+    body.blit(ok, ok.get_rect(center=btn.center))
+
+    if alpha < 255:
+        body.set_alpha(alpha)
+    c.blit(body, rect.topleft)
+
+
+class CrashScreen:
+    """Перед синим экраном: игра «сворачивается», экран тонет в ошибках."""
+
+    MINIMIZE = 0.55
+    FIRST_DELAY = 0.95
+    STEP = 1.05
+    TAIL = 1.35
+    DIALOG_W, DIALOG_H = 560, 190
+
+    def __init__(self, app, last_frame=None, desktop=None):
+        self.app = app
+        self.t = 0.0
+        self.done = False
+        self.result = None
+        self.frame = last_frame
+        self.desktop = desktop
+        self.shown = 0
+        self.next_at = self.FIRST_DELAY
+        self.fade = 0.0
+        self.pluses = []
+        self._spawn_pluses(18)
+        self.app.audio.stop_music(250)
+        self.app.audio.play("boom", 0.55)
+
+    # -- сломанные плюсы ----------------------------------------------------
+    def _spawn_pluses(self, n):
+        for _ in range(n):
+            self.pluses.append(self._new_plus(random.uniform(-CH, CH)))
+
+    def _new_plus(self, y=None):
+        size = random.randint(40, 84)
+        kind = random.choices(("bent", "cracked", "crossed"), (5, 4, 2))[0]
+        color = random.choice(PLUS_COLORS)
+        img = make_broken_plus(size, color, kind, random.randint(0, 3),
+                               random.choice((-1, 1)))
+        shards = []
+        for sh in make_shards(size, color, random.randint(3, 6)):
+            shards.append({
+                "dx": random.uniform(-size * 0.6, size * 0.6),
+                "dy": random.uniform(-size * 0.4, size * 0.4),
+                "vy": random.uniform(120, 340),
+                "vx": random.uniform(-70, 70),
+                "spin": random.uniform(-220, 220),
+                "rot": random.uniform(0, 360),
+                "img": sh,
+            })
+        return {
+            "x": random.uniform(0, CW),
+            "y": CH + size if y is None else y,
+            "vy": random.uniform(70, 200),
+            "vx": random.uniform(-40, 40),
+            "rot": random.uniform(0, 360),
+            "spin": random.uniform(-90, 90),
+            "img": img,
+            "alpha": random.randint(150, 235),
+            "size": size,
+            "shards": shards,
+        }
+
+    # -- update -------------------------------------------------------------
+    def update(self, dt, events):
+        self.t += dt
+        for p in self.pluses:
+            p["y"] += p["vy"] * dt
+            p["x"] += p["vx"] * dt
+            p["rot"] = (p["rot"] + p["spin"] * dt) % 360
+            for sh in p.get("shards", ()):
+                sh["dx"] += sh["vx"] * dt
+                sh["dy"] += sh["vy"] * dt
+                sh["vy"] += 120 * dt
+                sh["rot"] = (sh["rot"] + sh["spin"] * dt) % 360
+        self.pluses = [p for p in self.pluses if p["y"] < CH + 120]
+        if len(self.pluses) < 22:
+            self.pluses.append(self._new_plus())
+
+        if self.t >= self.next_at and self.shown < len(ERRORS):
+            self.app.audio.play("error", 0.55)
+            self.shown += 1
+            self.next_at = self.t + self.STEP
+
+        if self.shown >= len(ERRORS) and self.t > self.next_at + self.TAIL:
+            self.fade += dt / 0.7
+            if self.fade >= 1:
+                self.done = True
+
+    # -- draw ---------------------------------------------------------------
+    def draw(self):
+        c = self.app.display.canvas
+        c.fill((0, 0, 0))
+
+        # рабочий стол, на который «свернулась» игра
+        if self.desktop is not None:
+            c.blit(self.desktop, (0, 0))
+            k = clamp(self.t / 0.45, 0, 1)
+            dark = pygame.Surface((CW, CH))
+            dark.fill((0, 0, 0))
+            dark.set_alpha(int(90 * (1 - k)))
+            c.blit(dark, (0, 0))
+        else:
+            c.fill((18, 24, 34))
+
+        # плюсы идут по столу, за ними тянутся осколки
+        for p in self.pluses:
+            for sh in p.get("shards", ()):
+                si = pygame.transform.rotate(sh["img"], sh["rot"])
+                c.blit(si, (p["x"] + sh["dx"] - si.get_width() // 2,
+                            p["y"] + sh["dy"] - si.get_height() // 2))
+            img = pygame.transform.rotate(p["img"], p["rot"])
+            img.set_alpha(p["alpha"])
+            c.blit(img, (p["x"] - img.get_width() // 2, p["y"] - img.get_height() // 2))
+
+        # каскад диалогов
+        for i in range(self.shown):
+            title, text = ERRORS[i]
+            x = 128 + i * 46
+            y = 84 + i * 66
+            x = clamp(x, 12, CW - self.DIALOG_W - 12)
+            y = clamp(y, 12, CH - self.DIALOG_H - 12)
+            age = self.t - (self.FIRST_DELAY + i * self.STEP)
+            k = clamp(age / 0.16, 0, 1)
+            a = int(255 * ease_out(k))
+            rect = pygame.Rect(x, y + int((1 - k) * 14), self.DIALOG_W, self.DIALOG_H)
+            draw_error_dialog(c, rect, title, text, alpha=a)
+
+        # уход игры: сжимаем последний кадр боя
+        if self.t < self.MINIMIZE:
+            k = clamp(self.t / self.MINIMIZE, 0, 1)
+            e = ease_in_out(k)
+            sc = 1.0 - 0.93 * e
+            w = max(2, int(CW * sc))
+            h = max(2, int(CH * sc))
+            if self.frame is not None:
+                fr = pygame.transform.smoothscale(self.frame, (w, h))
+            else:
+                fr = pygame.Surface((w, h))
+                fr.fill((6, 8, 12))
+            tx = CW - w - 48
+            ty = CH - h - 64
+            x = int(lerp((CW - w) // 2, tx, e))
+            y = int(lerp((CH - h) // 2, ty, e))
+            fr.set_alpha(int(255 * (1 - e ** 1.7)))
+            c.blit(fr, (x, y))
+
+        if self.fade > 0:
+            ov = pygame.Surface((CW, CH))
+            ov.fill((0, 0, 0))
+            ov.set_alpha(int(255 * clamp(self.fade, 0, 1)))
+            c.blit(ov, (0, 0))
+
+
 class BSODScreen:
     """Синий экран смерти Windows 10 — компоновка один-в-один с оригиналом.
 
@@ -3684,6 +3972,9 @@ class App:
             fight = FightScreen(self, 1, overlay=True, desktop=desktop)
             if self.run_screen(fight) != "lost":
                 return
+            # экран поражения: игра «сворачивается», стол заваливают ошибки
+            last_frame = self.display.canvas.copy()
+            self.run_screen(CrashScreen(self, last_frame, desktop))
             bsod = BSODScreen(self)
             self.display.go_fullscreen("")
             hide_taskbar()
