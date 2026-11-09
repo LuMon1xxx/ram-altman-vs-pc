@@ -529,7 +529,7 @@ class ToastScreen:
                 if self.scan_stage == 17:
                     self.found = ""
                 if self.scan_stage >= 26:
-                    self.found = "✔  Найдено 33 ГБ. Рекомендуется пожертвовать 1 ГБ."
+                    self.found = "Найдено 33 ГБ. Рекомендуется пожертвовать 1 ГБ."
 
         mp = pygame.mouse.get_pos()
         self.yes.hover = self.yes.rect.collidepoint(mp)
@@ -743,13 +743,42 @@ class Particle:
 
 
 class FightScreen:
+    # Константы баланса и физики боя
     FLOOR = 608
+    MAX_PARTICLES = 180
+    ROUND_TIME = 90.0
+
+    P_HP_R1 = 180.0
+    P_HP_R2 = 200.0
+    SAM_HP_R1 = 180.0
+    SAM_HP_R2 = 180.0
+    SCRIPT_HP = 25.0
+
+    GRAV = 1950.0
+    JUMP_VY = -780.0
+    SAM_JUMP_VY = -660.0
+    MOVE_SPEED = 350.0
+
+    BACKSTEP_VX = -680.0
+    BACKSTEP_DUR = 0.22
+    BACKSTEP_INVULN = 0.20
+    BACKSTEP_CD = 0.85
+
+    CHARGE_NEED = 0.60
+    SPECIAL_CD = 6.5
+    COMBO_STEP = 0.08
+    COMBO_MAX = 10
+
+    LASER_TELEGRAPH = 0.90
+    ORB_Y = 562
+    ORB_SPEED = 450.0
 
     def __init__(self, app, round_no=1, overlay=False, desktop=None):
         self.app = app
         self.round_no = round_no
         self.overlay = overlay
         self.t = 0.0
+        self.done = False
         self.result = None
         self.music_started = False
         self.over = False
@@ -766,6 +795,8 @@ class FightScreen:
             self.dim = pygame.Surface((CW, CH))
             self.dim.fill((3, 5, 8))
             self.dim.set_alpha(96)
+
+        # Основные спрайты
         self.pc_img = pygame.image.load(asset("pc.png")).convert_alpha()
         _si = pygame.image.load(asset("sam_fight.png")).convert_alpha()
         _sh = 384
@@ -786,28 +817,58 @@ class FightScreen:
         self.avatar = pygame.image.load(asset("sam_avatar.png")).convert_alpha()
         self.avatar = pygame.transform.smoothscale(self.avatar, (72, 72))
         self.ram_icon = pygame.image.load(asset("ram_icon.png")).convert_alpha()
+        self.logo = pygame.image.load(asset("logo_green.png")).convert_alpha()
+        self.logo = pygame.transform.smoothscale(self.logo, (90, 90))
+
+        # Новые спрайты боя из assets/ (создаются в tools/build_assets.py)
+        self.orb_img = pygame.image.load(asset("orb_gpt.png")).convert_alpha()
+        self.screw_img = pygame.image.load(asset("screw_proj.png")).convert_alpha()
+        self.dollar_img = pygame.image.load(asset("dollar_drop.png")).convert_alpha()
+        self.marker_img = pygame.image.load(asset("floor_marker.png")).convert_alpha()
+        self.mini_rack_img = pygame.image.load(asset("mini_rack.png")).convert_alpha()
+        self.auras = {
+            1: pygame.image.load(asset("aura_p1.png")).convert_alpha(),
+            2: pygame.image.load(asset("aura_p2.png")).convert_alpha(),
+            3: pygame.image.load(asset("aura_p3.png")).convert_alpha(),
+        }
+
+        p_hp = self.P_HP_R2 if round_no == 2 else self.P_HP_R1
+        s_hp = self.SAM_HP_R2 if round_no == 2 else self.SAM_HP_R1
 
         self.player = {
             "x": 330.0,
-            "hp": 100.0,
-            "maxhp": 100.0,
-            "ghost": 100.0,
+            "y": float(self.FLOOR),
+            "vy": 0.0,
+            "on_ground": True,
+            "hp": p_hp,
+            "maxhp": p_hp,
+            "ghost": p_hp,
             "face": 1,
             "atk": 0.0,
             "atk_cd": 0.0,
+            "air_atk": False,
             "special_cd": 0.0,
             "hurt": 0.0,
             "lunge": 0.0,
             "dead": False,
             "dash": 0.0,
             "vx": 0.0,
+            "invuln": 0.0,
+            "backstep_t": 0.0,
+            "backstep_cd": 0.0,
+            "charge_t": 0.0,
+            "charging": False,
+            "afterimages": [],
         }
         self.sam = {
             "x": 970.0,
-            "hp": 100.0,
-            "maxhp": 100.0,
-            "ghost": 100.0,
-            "atk_cd": 1.2,
+            "y": float(self.FLOOR),
+            "vy": 0.0,
+            "on_ground": True,
+            "hp": s_hp,
+            "maxhp": s_hp,
+            "ghost": s_hp,
+            "atk_cd": 1.3,
             "hurt": 0.0,
             "stun": 0.0,
             "dead": False,
@@ -815,18 +876,25 @@ class FightScreen:
             "bob": 0.0,
             "blink": 0.0,
             "rise": 0.0,
-            "vy": 0.0,
             "x0": 970.0,
+            "boss_phase": 1,
+            "alpha": 255,
+            "tp_timer": 0.0,
+            "tp_target": 970.0,
+            "orb_cd": 3.2,
+            "barrage_cd": 6.0,
         }
-        if round_no == 2:
-            self.player["hp"] = self.player["maxhp"] = self.player["ghost"] = 140.0
-            self.sam["hp"] = self.sam["maxhp"] = self.sam["ghost"] = 100.0
 
         self.projectiles = []
+        self.orbs = []
+        self.orb_queue = []
+        self.hazards = []
         self.tabs = []
         self.particles = []
         self.damage_text = []
+
         self.shake_t = 0.0
+        self.shake_dur = 0.001
         self.shake_mag = 0.0
         self.flash = 0.0
         self.flash_color = (255, 255, 255)
@@ -845,12 +913,14 @@ class FightScreen:
         self.sam_taunt = ""
         self.sam_taunt_t = 0.0
         self.fight_start = 0.0
+        self.round_timer = self.ROUND_TIME
+        self.phase_banner = ""
+        self.phase_banner_t = 0.0
+
         self.scan = scanline_surface(CW, CH, 16, 4)
         self.vign = vignette_surface(CW, CH, 120)
-        self.logo = pygame.image.load(asset("logo_green.png")).convert_alpha()
-        self.logo = pygame.transform.smoothscale(self.logo, (90, 90))
 
-    # helpers --------------------------------------------------------------
+    # Вспомогательные методы -----------------------------------------------
     def say(self, txt, dur=1.6):
         self.sam_taunt = txt
         self.sam_taunt_t = dur
@@ -867,6 +937,8 @@ class FightScreen:
         grav=900,
     ):
         for _ in range(n):
+            if len(self.particles) >= self.MAX_PARTICLES:
+                break
             a = random.uniform(0, math.tau)
             v = random.uniform(speed * 0.3, speed)
             self.particles.append(
@@ -882,30 +954,46 @@ class FightScreen:
                 )
             )
 
+    def combo_mult(self):
+        return 1.0 + min(self.combo, self.COMBO_MAX) * self.COMBO_STEP
+
     def dmg(self, target, amount, x=None, y=None, big=False, color=(255, 235, 120)):
-        d = self.player if target == "player" else self.sam
-        d["hp"] = max(0.0, d["hp"] - amount)
-        d["hurt"] = 0.22
+        if target == "player":
+            p = self.player
+            if p["invuln"] > 0 and not big:
+                return
+            p["hp"] = max(0.0, p["hp"] - amount)
+            p["hurt"] = 0.22
+            self.combo = 0
+            self.combo_t = 0.0
+            d = p
+        else:
+            s = self.sam
+            if not big:
+                amount = int(round(amount * self.combo_mult()))
+            s["hp"] = max(0.0, s["hp"] - amount)
+            s["hurt"] = 0.20
+            self.combo += 1
+            self.combo_t = 2.1
+            d = s
+
         self.damage_text.append(
             {
                 "x": x if x is not None else d["x"] + random.randint(-24, 24),
-                "y": y if y is not None else 330 + random.randint(-30, 10),
+                "y": y if y is not None else d["y"] - 260 + random.randint(-30, 10),
                 "t": 0.0,
                 "life": 0.9 if not big else 1.6,
-                "txt": str(int(amount)) if not big else str(int(amount)),
+                "txt": str(int(amount)),
                 "size": 40 if not big else 96,
                 "color": color,
             }
         )
-        if target == "sam":
-            self.combo += 1
-            self.combo_t = 1.1
 
     def shake(self, mag, dur):
         self.shake_mag = mag
-        self.shake_t = self.shake_dur = dur
+        self.shake_t = self.shake_dur = max(0.001, dur)
 
-    # update ---------------------------------------------------------------
+    # Основной цикл обновления ---------------------------------------------
     def update(self, dt, events):
         self.t += dt
         self.mode_t += dt
@@ -921,8 +1009,16 @@ class FightScreen:
                     if e.key == pygame.K_SPACE and self.phase == "r2_cue":
                         self.do_dodge()
                 elif self.mode == "fight":
-                    if e.key == pygame.K_SPACE:
-                        self.player_attack()
+                    if e.key in (pygame.K_w, pygame.K_UP):
+                        self.player_jump()
+                    elif e.key in (pygame.K_s, pygame.K_DOWN):
+                        self.player_backstep()
+                    elif e.key == pygame.K_SPACE:
+                        if not self.player["on_ground"]:
+                            self.player_air_attack()
+                        else:
+                            self.player["charging"] = True
+                            self.player["charge_t"] = 0.0
                     elif e.key == pygame.K_f:
                         self.player_special()
                 if (
@@ -932,8 +1028,19 @@ class FightScreen:
                 ):
                     self.result = "won" if self.round_no == 2 else "lost"
 
+            elif e.type == pygame.KEYUP and self.mode == "fight":
+                if e.key == pygame.K_SPACE and self.player["charging"]:
+                    held = self.player["charge_t"]
+                    self.player["charging"] = False
+                    self.player["charge_t"] = 0.0
+                    if held >= self.CHARGE_NEED:
+                        self.player_fire_screw()
+                    else:
+                        self.player_attack()
+
         self.shake_t = max(0.0, self.shake_t - dt)
         self.flash = max(0.0, self.flash - dt * 3.2)
+        self.phase_banner_t = max(0.0, self.phase_banner_t - dt)
         self.combo_t -= dt
         if self.combo_t <= 0:
             self.combo = 0
@@ -941,15 +1048,23 @@ class FightScreen:
 
         for p in self.particles:
             p.life -= dt
-        self.particles = [p for p in self.particles if p.life > 0]
-        for p in self.particles:
             p.x += p.vx * dt
             p.y += p.vy * dt
             p.vy += p.grav * dt
+        self.particles = [p for p in self.particles if p.life > 0]
+        if len(self.particles) > self.MAX_PARTICLES:
+            self.particles = self.particles[-self.MAX_PARTICLES :]
+
         for d in self.damage_text:
             d["t"] += dt
             d["y"] -= 60 * dt
         self.damage_text = [d for d in self.damage_text if d["t"] < d["life"]]
+
+        for ai in self.player["afterimages"]:
+            ai["life"] -= dt
+        self.player["afterimages"] = [
+            ai for ai in self.player["afterimages"] if ai["life"] > 0
+        ]
 
         if self.mode == "intro":
             self.update_intro(dt)
@@ -989,167 +1104,554 @@ class FightScreen:
         if self.round_no == 2:
             self.app.audio.play("vo_round2", 0.95)
             self.say("Реванш? Твоя память уже в Калифорнии.", 2.4)
+        else:
+            self.say("Сдавай планки DDR5 добровольно!", 2.2)
+
+    # Приёмы игрока --------------------------------------------------------
+    def player_jump(self):
+        p = self.player
+        if p["dead"] or not p["on_ground"]:
+            return
+        p["vy"] = self.JUMP_VY
+        p["on_ground"] = False
+        self.app.audio.play("whoosh", 0.45)
+        self.burst(
+            p["x"],
+            self.FLOOR - 4,
+            8,
+            [(180, 190, 205), (120, 130, 145)],
+            190,
+            0.35,
+            (2, 4),
+            350,
+        )
+
+    def player_backstep(self):
+        p = self.player
+        if p["dead"] or p["backstep_cd"] > 0:
+            return
+        p["backstep_t"] = self.BACKSTEP_DUR
+        p["backstep_cd"] = self.BACKSTEP_CD
+        p["invuln"] = self.BACKSTEP_INVULN
+        p["charging"] = False
+        p["charge_t"] = 0.0
+        self.app.audio.play("whoosh", 0.75)
+        for i in range(4):
+            p["afterimages"].append(
+                {
+                    "x": p["x"] + i * 18,
+                    "y": p["y"],
+                    "life": 0.22 - i * 0.04,
+                    "max_life": 0.22,
+                }
+            )
 
     def player_attack(self):
         p = self.player
         if p["atk_cd"] > 0 or p["dead"]:
             return
-        p["atk"] = 0.34
-        p["atk_cd"] = 0.36
+        p["atk"] = 0.30
+        p["atk_cd"] = 0.34
+        p["air_atk"] = False
         p["lunge"] = 1.0
         self.app.audio.play("whoosh", 0.45)
-        dist = self.sam["x"] - p["x"]
-        if dist < 245:
-            dmg = random.randint(9, 13)
-            self.dmg("sam", dmg, self.sam["x"] - 30, 330)
+        dist = abs(self.sam["x"] - p["x"])
+        if dist < 245 and abs(self.sam["y"] - p["y"]) < 140:
+            dmg = random.randint(8, 11)
+            self.dmg("sam", dmg, self.sam["x"] - 30, self.sam["y"] - 260)
             self.app.audio.play("hit", 0.9)
-            self.burst(self.sam["x"] - 20, 360, 16)
-            self.shake(7, 0.18)
-            self.sam["stun"] = 0.12
+            self.burst(self.sam["x"] - 20, self.sam["y"] - 230, 14)
+            self.shake(6, 0.16)
+            self.sam["stun"] = 0.11
             if self.sam["hp"] <= 0:
                 self.ko_sam()
         else:
-            self.say("Промах! Хром тормозит.", 1.0)
+            if random.random() < 0.35:
+                self.say("Промах! Хром тормозит.", 1.0)
+
+    def player_air_attack(self):
+        p = self.player
+        if p["atk_cd"] > 0 or p["dead"]:
+            return
+        p["atk"] = 0.42
+        p["atk_cd"] = 0.56
+        p["air_atk"] = True
+        p["vy"] = max(p["vy"], 260.0)
+        p["charging"] = False
+        p["charge_t"] = 0.0
+        self.app.audio.play("whoosh", 0.7)
+        dist = abs(self.sam["x"] - p["x"])
+        if dist < 265:
+            dmg = random.randint(14, 18)
+            self.dmg(
+                "sam",
+                dmg,
+                self.sam["x"] - 20,
+                self.sam["y"] - 280,
+                color=(255, 200, 90),
+            )
+            self.app.audio.play("hit", 1.0)
+            self.app.audio.play("clang", 0.55)
+            self.burst(
+                self.sam["x"] - 20,
+                self.sam["y"] - 240,
+                22,
+                [(95, 215, 255), (255, 230, 120), (255, 255, 255)],
+                500,
+            )
+            self.shake(10, 0.24)
+            self.sam["stun"] = 0.20
+            if self.sam["hp"] <= 0:
+                self.ko_sam()
+
+    def player_fire_screw(self):
+        p = self.player
+        if p["dead"]:
+            return
+        p["atk"] = 0.28
+        p["atk_cd"] = 0.40
+        self.app.audio.play("clang", 0.65)
+        self.app.audio.play("whoosh", 0.8)
+        self.burst(
+            p["x"] + 80,
+            p["y"] - 170,
+            10,
+            [(95, 215, 255), (255, 255, 255)],
+            320,
+            0.35,
+        )
+        self.projectiles.append(
+            {
+                "kind": "screw",
+                "x": p["x"] + 90,
+                "y": p["y"] - 170,
+                "vx": 780.0,
+                "t": 0.0,
+                "rot": 0.0,
+                "spin": -720.0,
+                "hit": False,
+            }
+        )
 
     def player_special(self):
         p = self.player
         if p["special_cd"] > 0 or p["dead"]:
             return
-        p["special_cd"] = 5.5
+        p["special_cd"] = self.SPECIAL_CD
         self.app.audio.play("tabs", 1.0)
         self.app.audio.play("whoosh", 0.7)
         sx = self.sam["x"]
-        for i in range(7):
+        for i in range(8):
             self.tabs.append(
                 {
-                    "x": sx + random.randint(-150, 150),
-                    "y": -200 - i * 80,
-                    "vy": random.randint(520, 700),
+                    "x": clamp(sx + random.randint(-220, 220), 220, CW - 120),
+                    "y": -180 - i * 75,
+                    "vy": random.randint(560, 740),
                     "hit": False,
                     "rot": random.uniform(-18, 18),
-                    "delay": i * 0.07,
+                    "delay": i * 0.06,
                 }
             )
 
+    # Основная логика боя --------------------------------------------------
     def update_fight(self, dt):
         p, s = self.player, self.sam
         keys = pygame.key.get_pressed()
+
+        # Таймер раунда
+        self.round_timer = max(0.0, self.round_timer - dt)
+        if self.round_timer <= 0 and not self.over:
+            if self.round_no == 1:
+                self.start_r1_cutscene()
+            else:
+                self.start_r2_cutscene()
+            return
+
+        # Удержание заряда Пробела
+        if p["charging"] and not p["dead"]:
+            if keys[pygame.K_SPACE]:
+                p["charge_t"] += dt
+            else:
+                held = p["charge_t"]
+                p["charging"] = False
+                p["charge_t"] = 0.0
+                if held >= self.CHARGE_NEED:
+                    self.player_fire_screw()
+                else:
+                    self.player_attack()
+
+        # Движение игрока по горизонтали
         moving = 0
         if not p["dead"]:
             if keys[pygame.K_LEFT] or keys[pygame.K_a]:
                 moving -= 1
             if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
                 moving += 1
-        p["vx"] = moving * 330
-        if p["atk"] <= 0:
-            p["x"] = clamp(p["x"] + moving * 330 * dt, 120, 660)
-        p["x"] += p["lunge"] * 120 * dt * (1 if p["atk"] > 0.2 else 0)
-        p["lunge"] = max(0.0, p["lunge"] - dt * 3)
+
+        if p["backstep_t"] > 0:
+            p["backstep_t"] = max(0.0, p["backstep_t"] - dt)
+            p["x"] = clamp(p["x"] + self.BACKSTEP_VX * dt, 95, 760)
+        else:
+            spd = self.MOVE_SPEED * (0.65 if p["charging"] else 1.0)
+            p["vx"] = moving * spd
+            if p["atk"] <= 0 or not p["on_ground"]:
+                p["x"] = clamp(p["x"] + moving * spd * dt, 95, 760)
+
+        p["x"] = clamp(
+            p["x"] + p["lunge"] * 120 * dt * (1 if p["atk"] > 0.18 else 0), 95, 760
+        )
+        p["lunge"] = max(0.0, p["lunge"] - dt * 3.2)
+
+        # Прыжок и гравитация игрока
+        if not p["on_ground"]:
+            p["y"] += p["vy"] * dt
+            p["vy"] += self.GRAV * dt
+            if p["y"] >= self.FLOOR:
+                p["y"] = float(self.FLOOR)
+                p["vy"] = 0.0
+                p["on_ground"] = True
+                # Приземление с пылью (и доп. задержка после удара в воздухе)
+                dust_n = 14 if p["air_atk"] else 8
+                self.burst(
+                    p["x"],
+                    self.FLOOR - 3,
+                    dust_n,
+                    [(195, 205, 220), (130, 140, 155)],
+                    240 if p["air_atk"] else 160,
+                    0.42,
+                    (2, 5),
+                    400,
+                )
+                if p["air_atk"]:
+                    p["atk_cd"] = max(p["atk_cd"], 0.42)
+                    self.shake(5, 0.12)
+                p["air_atk"] = False
+
         p["atk"] = max(0.0, p["atk"] - dt)
         p["atk_cd"] = max(0.0, p["atk_cd"] - dt)
         p["special_cd"] = max(0.0, p["special_cd"] - dt)
-        p["hit_anim"] = 0
+        p["invuln"] = max(0.0, p["invuln"] - dt)
+        p["backstep_cd"] = max(0.0, p["backstep_cd"] - dt)
 
-        # Sam AI
-        s["atk_cd"] -= dt
-        s["stun"] = max(0.0, s["stun"] - dt)
-        dist = s["x"] - p["x"]
-        if s["stun"] <= 0 and not s["dead"]:
-            if dist > 470:
-                s["x"] -= 150 * dt
-            elif dist < 250:
-                s["x"] += 130 * dt
-            s["x"] = clamp(s["x"], 700, 1165)
-        s["pose"] = "summon" if s["stun"] > 0 else "idle"
-        if s["atk_cd"] <= 0 and s["stun"] <= 0 and not s["dead"] and not p["dead"]:
-            if dist < 250:
-                self.sam_melee()
-                s["atk_cd"] = random.uniform(1.5, 2.4)
-            else:
-                if random.random() < 0.62:
-                    self.sam_coin()
-                else:
-                    self.sam_laser()
-                s["atk_cd"] = random.uniform(1.5, 2.5)
-            if random.random() < 0.25:
-                self.say(
-                    random.choice(
-                        [
-                            "Это ради AGI!",
-                            "Ещё один гигабайт!",
-                            "Не сопротивляйся.",
-                            "$20 — и память ваша.",
-                        ]
-                    ),
-                    1.4,
+        # Проверка смены фаз Сэма (66% и 33% HP)
+        hp_frac = s["hp"] / s["maxhp"]
+        if hp_frac <= 0.66 and s["boss_phase"] == 1:
+            s["boss_phase"] = 2
+            self.phase_banner = "ФАЗА 2 · GPT-5 TURBO MODE"
+            self.phase_banner_t = 2.2
+            self.flash = 0.55
+            self.flash_color = (95, 215, 255)
+            self.shake(12, 0.35)
+            self.app.audio.play("gong", 0.8)
+            self.say("Подключаю кластеры! Больше инвестиций!", 2.2)
+            self.spawn_orb_wave()
+        elif hp_frac <= 0.33 and s["boss_phase"] < 3:
+            s["boss_phase"] = 3
+            self.phase_banner = "ФАЗА 3 · AGI OVERCLOCK"
+            self.phase_banner_t = 2.4
+            self.flash = 0.7
+            self.flash_color = (255, 90, 90)
+            self.shake(15, 0.45)
+            self.app.audio.play("gong", 0.95)
+            self.say("AGI ПОЧТИ ГОТОВ! ОТДАЙ ВСЮ ПАМЯТЬ!", 2.4)
+            self.sam_server_barrage()
+
+        # Гравитация и прыжки Сэма
+        if not s["on_ground"]:
+            s["y"] += s["vy"] * dt
+            s["vy"] += self.GRAV * dt
+            if s["y"] >= self.FLOOR:
+                s["y"] = float(self.FLOOR)
+                s["vy"] = 0.0
+                s["on_ground"] = True
+
+        # Телепорт («апдейт модели»)
+        if s["tp_timer"] > 0:
+            s["tp_timer"] -= dt
+            s["alpha"] = 95
+            if s["tp_timer"] <= 0:
+                s["x"] = s["tp_target"]
+                s["alpha"] = 255
+                self.burst(
+                    s["x"],
+                    s["y"] - 190,
+                    18,
+                    [(80, 255, 175), (95, 215, 255), (255, 255, 255)],
+                    420,
+                    0.45,
                 )
+        else:
+            s["alpha"] = 255
 
-        # projectiles
+        # ИИ Сэма
+        speed_mult = (
+            1.0
+            if s["boss_phase"] == 1
+            else (1.28 if s["boss_phase"] == 2 else 1.55)
+        )
+        s["atk_cd"] -= dt * speed_mult
+        s["orb_cd"] -= dt
+        s["barrage_cd"] -= dt
+        s["stun"] = max(0.0, s["stun"] - dt)
+
+        dist = s["x"] - p["x"]
+        if s["stun"] <= 0 and not s["dead"] and s["tp_timer"] <= 0:
+            if dist > 480:
+                s["x"] -= 155 * speed_mult * dt
+            elif dist < 255:
+                s["x"] += 140 * speed_mult * dt
+            s["x"] = clamp(s["x"], 680, 1170)
+
+        s["pose"] = "summon" if s["stun"] > 0 else "idle"
+
+        # Регулярный запуск шаров-логотипов ChatGPT
+        if s["orb_cd"] <= 0 and not s["dead"] and not p["dead"]:
+            self.spawn_orb_wave()
+            s["orb_cd"] = random.uniform(6.2, 8.8) / (
+                1.0 + 0.15 * (s["boss_phase"] - 1)
+            )
+
+        # Серверный шквал в 3-й фазе
+        if (
+            s["boss_phase"] >= 3
+            and s["barrage_cd"] <= 0
+            and not s["dead"]
+            and not p["dead"]
+        ):
+            self.sam_server_barrage()
+            s["barrage_cd"] = random.uniform(7.5, 10.0)
+
+        if s["atk_cd"] <= 0 and s["stun"] <= 0 and not s["dead"] and not p["dead"]:
+            self.choose_sam_attack(dist)
+            s["atk_cd"] = random.uniform(1.45, 2.25)
+
+        # Очередь спавна шаров-логотипов
+        for item in list(self.orb_queue):
+            item["delay"] -= dt
+            if item["delay"] <= 0:
+                self.orbs.append(
+                    {
+                        "x": -50.0,
+                        "y": float(self.ORB_Y),
+                        "vx": item["speed"],
+                        "rot": 0.0,
+                        "hit": False,
+                        "sam_jumped": False,
+                    }
+                )
+                self.app.audio.play("whoosh", 0.5)
+                self.orb_queue.remove(item)
+
+        # Движение и коллизии шаров-логотипов ChatGPT
+        for ob in list(self.orbs):
+            ob["x"] += ob["vx"] * dt
+            ob["rot"] -= 340 * dt
+
+            # Игрок обязан перепрыгивать шары на W
+            if not ob["hit"] and not p["dead"]:
+                if abs(ob["x"] - p["x"]) < 54 and p["y"] > self.FLOOR - 78:
+                    ob["hit"] = True
+                    self.dmg(
+                        "player",
+                        random.randint(9, 13),
+                        p["x"],
+                        p["y"] - 180,
+                        color=(255, 110, 90),
+                    )
+                    self.app.audio.play("hit", 0.85)
+                    self.burst(
+                        ob["x"],
+                        ob["y"],
+                        14,
+                        [(80, 255, 175), (255, 255, 255)],
+                        360,
+                        0.45,
+                    )
+                    self.shake(7, 0.16)
+
+            # ИРОНИЯ: Сэм сам подпрыгивает через свои же шары
+            if (
+                not ob["sam_jumped"]
+                and not s["dead"]
+                and s["x"] - 185 <= ob["x"] <= s["x"] - 35
+            ):
+                ob["sam_jumped"] = True
+                if s["on_ground"]:
+                    s["vy"] = self.SAM_JUMP_VY
+                    s["on_ground"] = False
+                    self.app.audio.play("whoosh", 0.4)
+                    if random.random() < 0.48:
+                        self.say(
+                            random.choice(
+                                [
+                                    "Мои же шары!",
+                                    "Опять свои же шары прыгать!",
+                                    "Кто пустил логотипы по полу?!",
+                                ]
+                            ),
+                            1.5,
+                        )
+
+            if ob["x"] > CW + 90:
+                ob["dead"] = True
+        self.orbs = [ob for ob in self.orbs if not ob.get("dead")]
+
+        # Снаряды (монеты, лазер, винты игрока)
         for pr in list(self.projectiles):
             pr["x"] += pr["vx"] * dt
             pr["t"] += dt
             pr["rot"] += pr["spin"] * dt
+
             if pr["kind"] == "coin":
                 r = pygame.Rect(0, 0, 46, 46)
                 r.center = (int(pr["x"]), int(pr["y"]))
-                if not pr["hit"] and r.colliderect(
-                    pygame.Rect(p["x"] - 70, self.FLOOR - 300, 140, 300)
-                ):
+                p_rect = pygame.Rect(
+                    int(p["x"] - 64), int(p["y"] - 290), 128, 290
+                )
+                if not pr["hit"] and r.colliderect(p_rect):
                     pr["hit"] = True
                     pr["dead"] = True
-                    self.dmg("player", random.randint(7, 10), p["x"], 340)
+                    self.dmg("player", random.randint(8, 11), p["x"], p["y"] - 220)
                     self.app.audio.play("coin", 0.8)
-                    self.burst(pr["x"], pr["y"], 12, [(255, 220, 120), (80, 230, 160)])
+                    self.burst(
+                        pr["x"], pr["y"], 12, [(255, 220, 120), (80, 230, 160)]
+                    )
                     self.shake(5, 0.15)
+
+            elif pr["kind"] == "screw":
+                if not pr["hit"] and not s["dead"]:
+                    if (
+                        abs(pr["x"] - s["x"]) < 72
+                        and abs(pr["y"] - (s["y"] - 190)) < 175
+                    ):
+                        pr["hit"] = True
+                        pr["dead"] = True
+                        self.dmg(
+                            "sam",
+                            random.randint(15, 20),
+                            s["x"] - 20,
+                            pr["y"],
+                            color=(95, 215, 255),
+                        )
+                        self.app.audio.play("hit", 0.95)
+                        self.app.audio.play("clang", 0.65)
+                        self.burst(
+                            pr["x"],
+                            pr["y"],
+                            18,
+                            [(95, 215, 255), (255, 230, 130), (255, 255, 255)],
+                            460,
+                        )
+                        self.shake(8, 0.2)
+                        s["stun"] = 0.16
+                        if s["hp"] <= 0:
+                            self.ko_sam()
+
             elif pr["kind"] == "laser_charge":
-                if pr["t"] > 0.72:
+                if pr["t"] >= self.LASER_TELEGRAPH:
                     pr["kind"] = "laser"
                     pr["t"] = 0.0
-                    self.app.audio.play("laser", 0.9)
-                    if abs(p["x"] - pr["x"]) < 78 and pr["y"] > 300:
-                        self.dmg("player", random.randint(11, 14), p["x"], 340)
-                        self.shake(8, 0.2)
+                    self.app.audio.play("laser", 0.95)
+                    if abs(p["x"] - pr["x"]) < 82 and p["y"] > self.FLOOR - 170:
+                        self.dmg(
+                            "player", random.randint(12, 16), p["x"], p["y"] - 230
+                        )
+                        self.shake(9, 0.22)
                     else:
-                        self.say("Увернулся? Просто галочка в логах.", 1.2)
+                        if random.random() < 0.5:
+                            self.say("Увернулся? Просто галочка в логах.", 1.2)
+
             elif pr["kind"] == "laser":
-                if pr["t"] > 0.3:
+                if pr["t"] > 0.32:
                     pr["dead"] = True
-            if pr["x"] < -100 or pr["x"] > CW + 100:
+
+            if pr["x"] < -120 or pr["x"] > CW + 120:
                 pr["dead"] = True
         self.projectiles = [p_ for p_ in self.projectiles if not p_.get("dead")]
 
-        # chrome tabs rain
+        # Падающие опасности по маркерам ($ инвестора и мини-стойки)
+        for hz in list(self.hazards):
+            if hz["delay"] > 0:
+                hz["delay"] -= dt
+                continue
+            hz["t"] += dt
+            if hz["state"] == "warn":
+                if hz["t"] >= hz["warn_dur"]:
+                    hz["state"] = "fall"
+                    hz["t"] = 0.0
+                    self.app.audio.play("whoosh", 0.65)
+            elif hz["state"] == "fall":
+                hz["y"] += hz["vy"] * dt
+                hz["vy"] += 1400 * dt
+                if hz["y"] >= self.FLOOR - 24:
+                    hz["y"] = float(self.FLOOR - 24)
+                    hz["state"] = "done"
+                    hz["dead"] = True
+                    rad = 115 if hz["kind"] == "dollar" else 95
+                    dmg_val = (
+                        random.randint(13, 17)
+                        if hz["kind"] == "dollar"
+                        else random.randint(11, 15)
+                    )
+                    self.app.audio.play(
+                        "coin" if hz["kind"] == "dollar" else "boom", 0.85
+                    )
+                    self.shake(9, 0.22)
+                    self.burst(
+                        hz["x"],
+                        self.FLOOR - 16,
+                        22,
+                        [(255, 215, 90), (80, 255, 175), (255, 255, 255)]
+                        if hz["kind"] == "dollar"
+                        else [(255, 140, 80), (80, 255, 175), (220, 220, 220)],
+                        480,
+                        0.65,
+                    )
+                    if abs(p["x"] - hz["x"]) < rad and p["y"] > self.FLOOR - 140:
+                        self.dmg(
+                            "player",
+                            dmg_val,
+                            p["x"],
+                            p["y"] - 220,
+                            color=(255, 200, 80),
+                        )
+        self.hazards = [h for h in self.hazards if not h.get("dead")]
+
+        # Вкладки Google Chrome (урон по площади)
         for tb in list(self.tabs):
             if tb["delay"] > 0:
                 tb["delay"] -= dt
                 continue
             tb["y"] += tb["vy"] * dt
-            if tb["y"] > 470 and not tb["hit"]:
+            if tb["y"] >= self.FLOOR - 48 and not tb["hit"]:
                 tb["hit"] = True
-                if abs(tb["x"] - s["x"]) < 190:
-                    self.dmg("sam", 5, tb["x"], 330)
+                # Урон по площади (AoE радиус 240 пкс)
+                if abs(tb["x"] - s["x"]) < 240 and not s["dead"]:
+                    self.dmg("sam", 4, tb["x"], s["y"] - 250)
                     self.app.audio.play("hit", 0.45)
-                    self.burst(
-                        tb["x"],
-                        420,
-                        8,
-                        [(200, 210, 225), (255, 255, 255)],
-                        300,
-                        0.4,
-                        (2, 4),
-                    )
+                    if s["hp"] <= 0:
+                        self.ko_sam()
+                self.burst(
+                    tb["x"],
+                    self.FLOOR - 20,
+                    9,
+                    [(200, 210, 225), (95, 215, 255), (255, 255, 255)],
+                    320,
+                    0.4,
+                    (2, 4),
+                )
                 self.shake(4, 0.1)
             if tb["y"] > 760:
                 tb["dead"] = True
         self.tabs = [tb for tb in self.tabs if not tb.get("dead")]
 
-        # scripted rack
+        # Скриптовая серверная стойка H100 при HP <= 25
         if self.round_no == 1:
-            if s["hp"] <= 25 and self.phase is None and not self.over:
+            if s["hp"] <= self.SCRIPT_HP and self.phase is None and not self.over:
                 self.start_r1_cutscene()
         else:
             if (
-                s["hp"] <= 25
+                s["hp"] <= self.SCRIPT_HP
                 and self.phase is None
                 and self.t > self.rack_ready
                 and not self.over
@@ -1159,13 +1661,78 @@ class FightScreen:
         if p["hp"] <= 0 and not p["dead"] and not self.over:
             self.player_die()
 
+    # Атаки Сэма -----------------------------------------------------------
+    def choose_sam_attack(self, dist):
+        s = self.sam
+        if dist < 245:
+            if s["boss_phase"] >= 2 and random.random() < 0.35:
+                self.sam_model_update()
+            else:
+                self.sam_melee()
+            return
+
+        roll = random.random()
+        if s["boss_phase"] == 1:
+            if roll < 0.45:
+                self.sam_coin()
+            elif roll < 0.80:
+                self.sam_laser()
+            else:
+                self.sam_investor_drop()
+        elif s["boss_phase"] == 2:
+            if roll < 0.30:
+                self.sam_coin()
+            elif roll < 0.58:
+                self.sam_laser()
+            elif roll < 0.82:
+                self.sam_investor_drop()
+            else:
+                self.sam_model_update()
+        else:
+            if roll < 0.25:
+                self.sam_coin()
+            elif roll < 0.52:
+                self.sam_laser()
+            elif roll < 0.78:
+                self.sam_investor_drop()
+            else:
+                self.sam_model_update()
+
+        if random.random() < 0.24:
+            self.say(
+                random.choice(
+                    [
+                        "Это ради AGI!",
+                        "Ещё один гигабайт!",
+                        "Не сопротивляйся.",
+                        "$20 — и память ваша.",
+                        "Контекстное окно растёт!",
+                    ]
+                ),
+                1.4,
+            )
+
+    def spawn_orb_wave(self):
+        s = self.sam
+        count = random.randint(2, 3 if s["boss_phase"] == 1 else 4)
+        spd = self.ORB_SPEED + (s["boss_phase"] - 1) * 45.0
+        delay_acc = 0.15
+        for i in range(count):
+            self.orb_queue.append({"delay": delay_acc, "speed": spd})
+            # Иногда «двойной» шар с малым зазором
+            if i < count - 1 and random.random() < 0.38:
+                delay_acc += 0.36
+            else:
+                delay_acc += random.uniform(0.78, 1.05)
+        self.say("Лови шары ChatGPT! Прыгай на W!", 1.7)
+
     def sam_melee(self):
         p = self.player
-        dmg = random.randint(9, 13)
+        dmg = random.randint(10, 14)
         if not p["dead"]:
-            self.dmg("player", dmg, p["x"], 340)
+            self.dmg("player", dmg, p["x"], p["y"] - 220)
             self.app.audio.play("hit", 0.9)
-            self.burst(p["x"], 380, 14, [(255, 120, 90), (255, 220, 150)])
+            self.burst(p["x"], p["y"] - 190, 14, [(255, 120, 90), (255, 220, 150)])
             self.shake(9, 0.2)
             self.say("Удар паяльником!", 1.0)
             p["atk"] = 0.0
@@ -1176,8 +1743,8 @@ class FightScreen:
             {
                 "kind": "coin",
                 "x": s["x"] - 90,
-                "y": 330,
-                "vx": -620,
+                "y": 350,
+                "vx": -620 - (s["boss_phase"] - 1) * 50,
                 "t": 0.0,
                 "rot": 0.0,
                 "spin": 540,
@@ -1187,7 +1754,6 @@ class FightScreen:
         self.app.audio.play("coin", 0.55)
 
     def sam_laser(self):
-        s = self.sam
         self.projectiles.append(
             {
                 "kind": "laser_charge",
@@ -1200,15 +1766,81 @@ class FightScreen:
                 "hit": False,
             }
         )
-        self.say("Лазер выпайки!", 1.0)
+        self.say("Усиленный лазер выпайки!", 1.1)
 
+    def sam_investor_drop(self):
+        px = clamp(self.player["x"] + random.randint(-60, 60), 150, 740)
+        self.hazards.append(
+            {
+                "kind": "dollar",
+                "x": px,
+                "y": -140.0,
+                "vy": 420.0,
+                "state": "warn",
+                "t": 0.0,
+                "warn_dur": 0.75,
+                "delay": 0.0,
+            }
+        )
+        if self.sam["boss_phase"] >= 2:
+            px2 = clamp(px + random.choice([-160, 160]), 150, 740)
+            self.hazards.append(
+                {
+                    "kind": "dollar",
+                    "x": px2,
+                    "y": -140.0,
+                    "vy": 420.0,
+                    "state": "warn",
+                    "t": 0.0,
+                    "warn_dur": 0.75,
+                    "delay": 0.25,
+                }
+            )
+        self.say("Призыв инвестора! $7 триллионов!", 1.5)
+
+    def sam_model_update(self):
+        s = self.sam
+        s["tp_timer"] = 0.26
+        s["tp_target"] = random.uniform(730, 1130)
+        self.app.audio.play("whoosh", 0.8)
+        self.burst(
+            s["x"], s["y"] - 190, 14, [(80, 255, 175), (95, 215, 255)], 360, 0.35
+        )
+        self.say("Апдейт весов модели!", 1.2)
+
+    def sam_server_barrage(self):
+        base_x = clamp(self.player["x"], 180, 660)
+        offsets = [-150, 0, 150]
+        random.shuffle(offsets)
+        for i, off in enumerate(offsets):
+            tx = clamp(base_x + off, 140, 740)
+            self.hazards.append(
+                {
+                    "kind": "mini_rack",
+                    "x": tx,
+                    "y": -180.0,
+                    "vy": 480.0,
+                    "state": "warn",
+                    "t": 0.0,
+                    "warn_dur": 0.70,
+                    "delay": i * 0.34,
+                }
+            )
+        self.say("СЕРВЕРНЫЙ ШКВАЛ!", 1.8)
+
+    # Нокаут и катсцены ----------------------------------------------------
     def ko_sam(self):
         s = self.sam
         s["dead"] = True
         self.app.audio.play("crowd", 0.8)
         self.app.audio.play("clang", 0.8)
         self.burst(
-            s["x"], 360, 40, [(255, 200, 100), (255, 80, 80), (255, 255, 255)], 600, 1.2
+            s["x"],
+            360,
+            40,
+            [(255, 200, 100), (255, 80, 80), (255, 255, 255)],
+            600,
+            1.2,
         )
         self.shake(16, 0.5)
         if self.round_no == 1:
@@ -1231,7 +1863,6 @@ class FightScreen:
     def update_over(self, dt):
         pass
 
-    # round 1 scripted loss ------------------------------------------------
     def start_r1_cutscene(self):
         self.mode = "cutscene"
         self.mode_t = 0.0
@@ -1239,6 +1870,12 @@ class FightScreen:
         self.phase_t = 0.0
         self.rack_y = -760.0
         self.rack_x = self.player["x"]
+        self.player["y"] = float(self.FLOOR)
+        self.player["on_ground"] = True
+        self.orbs.clear()
+        self.orb_queue.clear()
+        self.hazards.clear()
+        self.projectiles.clear()
         self.sam["atk_cd"] = 99
         self.sam["pose"] = "summon"
         self.app.audio.stop_music(600)
@@ -1252,6 +1889,12 @@ class FightScreen:
         self.phase_t = 0.0
         self.rack_y = -760.0
         self.rack_x = self.player["x"]
+        self.player["y"] = float(self.FLOOR)
+        self.player["on_ground"] = True
+        self.orbs.clear()
+        self.orb_queue.clear()
+        self.hazards.clear()
+        self.projectiles.clear()
         self.dodge_window = 2.9
         self.dodge_used = False
         self.sam["atk_cd"] = 99
@@ -1331,7 +1974,9 @@ class FightScreen:
                 self.flash = 1.0
                 self.flash_color = (255, 120, 90)
                 self.dmg("player", 55, p["x"], 320, big=True)
-                self.burst(p["x"], 520, 50, [(255, 200, 120), (255, 110, 70)], 700, 1.3)
+                self.burst(
+                    p["x"], 520, 50, [(255, 200, 120), (255, 110, 70)], 700, 1.3
+                )
                 self.say("Ха-ха-ха. Слабый компьютер.", 2.0)
                 self.app.audio.play("vo_laugh", 0.9)
         elif self.phase == "r2_miss":
@@ -1355,7 +2000,12 @@ class FightScreen:
                 self.shake(28, 1.0)
                 self.flash = 1.0
                 self.burst(
-                    self.rack_x, 520, 60, [(255, 210, 120), (160, 255, 210)], 800, 1.5
+                    self.rack_x,
+                    520,
+                    60,
+                    [(255, 210, 120), (160, 255, 210)],
+                    800,
+                    1.5,
                 )
                 self.dmg("sam", 75, s["x"], 300, big=True)
                 s["dead"] = True
@@ -1392,7 +2042,7 @@ class FightScreen:
         self.over = True
         self.result = "won"
 
-    # draw -----------------------------------------------------------------
+    # Отрисовка ------------------------------------------------------------
     def build_stage(self):
         """Translucent arena laid over the frozen desktop screenshot."""
         s = pygame.Surface((CW, CH), pygame.SRCALPHA)
@@ -1404,7 +2054,9 @@ class FightScreen:
                 a = int(16 * (1 - r / 300) ** 1.5)
                 pygame.draw.circle(s, col + (a,), (cx, 560), r)
         for w, a in ((22, 18), (12, 34), (5, 70), (2, 150)):
-            pygame.draw.line(s, (80, 255, 175, a), (0, self.FLOOR), (CW, self.FLOOR), w)
+            pygame.draw.line(
+                s, (80, 255, 175, a), (0, self.FLOOR), (CW, self.FLOOR), w
+            )
         pygame.draw.line(
             s, (255, 255, 255, 60), (0, self.FLOOR - 1), (CW, self.FLOOR - 1), 1
         )
@@ -1425,9 +2077,11 @@ class FightScreen:
         if self.stage is not None:
             world.blit(self.stage, (shake_x, shake_y))
         self.draw_floorshadows(world, shake_x, shake_y)
+        self.draw_hazards(world, shake_x, shake_y)
         self.draw_rack(world, shake_x, shake_y)
         self.draw_sam(world, shake_x, shake_y)
         self.draw_player(world, shake_x, shake_y)
+        self.draw_orbs(world, shake_x, shake_y)
         self.draw_projectiles(world, shake_x, shake_y)
         self.draw_tabs(world, shake_x, shake_y)
         self.draw_particles(world, shake_x, shake_y)
@@ -1446,46 +2100,77 @@ class FightScreen:
             c.blit(ov, (0, 0))
 
     def draw_floorshadows(self, s, dx, dy):
-        for x, w in ((self.player["x"], 120), (self.sam["x"], 135)):
+        for ent, w0 in ((self.player, 120), (self.sam, 135)):
+            h_gap = max(0.0, self.FLOOR - ent["y"])
+            scale = clamp(1.0 - h_gap / 380.0, 0.45, 1.0)
+            w = max(24, int(w0 * scale))
             sh = pygame.Surface((w, 26), pygame.SRCALPHA)
-            pygame.draw.ellipse(sh, (0, 0, 0, 130), sh.get_rect())
-            s.blit(sh, (x - w // 2 + dx, self.FLOOR - 14 + dy))
+            pygame.draw.ellipse(sh, (0, 0, 0, int(130 * scale)), sh.get_rect())
+            s.blit(sh, (ent["x"] - w // 2 + dx, self.FLOOR - 14 + dy))
 
     def draw_player(self, s, dx, dy):
         p = self.player
         img = self.pc_img
         x = p["x"] + dx
-        y = self.FLOOR + dy
-        ang = 0
-        if p["dead"]:
-            ang = -74
-        elif p["hurt"] > 0:
-            ang = 7
-        elif p["atk"] > 0:
-            ang = -5
+        y = p["y"] + dy
+
+        # Шлейф afterimage при отскоке S/вниз
+        for ai in p["afterimages"]:
+            ghost = img.copy()
+            ghost.set_alpha(int(115 * clamp(ai["life"] / ai["max_life"], 0, 1)))
+            s.blit(ghost, ghost.get_rect(midbottom=(ai["x"] + dx, ai["y"] + dy)))
+
         if p["dash"] > 0:
             p["dash"] = max(0.0, p["dash"] - 0.06)
             for i in range(3):
                 ghost = img.copy()
                 ghost.set_alpha(50 - i * 12)
                 s.blit(ghost, ghost.get_rect(midbottom=(x + 40 + i * 26, y)))
+
+        ang = 0
+        if p["dead"]:
+            ang = -74
+        elif p["hurt"] > 0:
+            ang = 7
+        elif p["air_atk"]:
+            ang = -14
+        elif p["atk"] > 0:
+            ang = -6
         if ang:
             img = pygame.transform.rotate(img, ang)
-        bob = math.sin(self.sam["bob"] * 2.6) * 3 if not p["dead"] else 0
+
+        bob = (
+            math.sin(self.sam["bob"] * 2.6) * 3
+            if (not p["dead"] and p["on_ground"])
+            else 0
+        )
         rect = img.get_rect(midbottom=(x, y + bob))
         s.blit(img, rect)
+
         if p["hurt"] > 0:
             g = self.pc_white.copy()
             g.set_alpha(int(230 * (p["hurt"] / 0.22)))
             s.blit(pygame.transform.rotate(g, ang) if ang else g, rect)
-        # punch spark
-        if p["atk"] > 0.2:
+
+        # Индикатор заряда выстрела винтами
+        if p["charging"] and not p["dead"]:
+            frac = clamp(p["charge_t"] / self.CHARGE_NEED, 0, 1)
+            bx, by = int(x - 48), int(y - 335)
+            pygame.draw.rect(s, (12, 16, 22), (bx, by, 96, 10), border_radius=4)
+            col = (80, 255, 175) if frac >= 1.0 else (95, 215, 255)
+            pygame.draw.rect(
+                s, col, (bx + 2, by + 2, int(92 * frac), 6), border_radius=3
+            )
+
+        # Дуги удара
+        if p["atk"] > 0.16:
             px = x + 120
+            py = y - 245
             for i in range(3):
                 pygame.draw.arc(
                     s,
-                    (255, 235, 170),
-                    (px - 20 - i * 8, 360 - i * 12, 70, 60),
+                    (95, 215, 255) if p["air_atk"] else (255, 235, 170),
+                    (px - 20 - i * 8, py - i * 12, 74, 64),
                     0.4,
                     2.2,
                     3,
@@ -1495,12 +2180,20 @@ class FightScreen:
         sm = self.sam
         img = self.sam_img
         x = sm["x"] + dx
-        y = self.FLOOR + dy + math.sin(sm["bob"] * 2.2) * 5
+        bob = math.sin(sm["bob"] * 2.2) * 5 if sm["on_ground"] else 0
+        y = sm["y"] + dy + bob
+
+        # Аура текущей фазы Сэма
+        if not sm["dead"]:
+            aura = self.auras.get(sm["boss_phase"], self.auras[1])
+            s.blit(aura, aura.get_rect(center=(x, y - 190)))
+
         if sm["dead"]:
             if self.phase in ("r2_fatality", "r2_combo"):
-                # blasted away
                 off = (
-                    min(1.0, self.phase_t / 0.6) if self.phase == "r2_fatality" else 1.0
+                    min(1.0, self.phase_t / 0.6)
+                    if self.phase == "r2_fatality"
+                    else 1.0
                 )
                 ang = -80 * off
                 img = pygame.transform.rotate(img, ang)
@@ -1512,21 +2205,40 @@ class FightScreen:
         elif sm["hurt"] > 0:
             img = pygame.transform.rotate(img, 6)
         elif sm["pose"] == "summon":
-            glow = pygame.Surface((420, 420), pygame.SRCALPHA)
-            pygame.draw.circle(glow, (60, 255, 160, 40), (210, 210), 190)
-            pygame.draw.circle(glow, (60, 255, 160, 30), (210, 210), 150)
-            s.blit(glow, (x - 210, y - 430))
             img = pygame.transform.scale(
                 img, (int(img.get_width() * 1.05), int(img.get_height() * 1.05))
             )
+
+        if sm["alpha"] < 255:
+            img = img.copy()
+            img.set_alpha(sm["alpha"])
+
         rect = img.get_rect(midbottom=(x, y))
         s.blit(img, rect)
         if sm["hurt"] > 0 and not sm["dead"]:
             g = self.sam_white.copy()
             g.set_alpha(int(230 * (sm["hurt"] / 0.22)))
             s.blit(g, g.get_rect(midbottom=(x, y)))
-        if sm["taunt"] if "taunt" in sm else False:
-            pass
+
+    def draw_orbs(self, s, dx, dy):
+        for ob in self.orbs:
+            rot_img = pygame.transform.rotate(self.orb_img, ob["rot"])
+            s.blit(rot_img, rot_img.get_rect(center=(ob["x"] + dx, ob["y"] + dy)))
+
+    def draw_hazards(self, s, dx, dy):
+        for hz in self.hazards:
+            if hz["delay"] > 0:
+                continue
+            mx = int(hz["x"] + dx)
+            my = int(self.FLOOR + dy)
+            s.blit(self.marker_img, self.marker_img.get_rect(center=(mx, my - 4)))
+            if hz["state"] == "warn":
+                pygame.draw.line(
+                    s, (255, 90, 90, 110), (mx, 80), (mx, my - 10), 2
+                )
+            elif hz["state"] == "fall":
+                sp = self.dollar_img if hz["kind"] == "dollar" else self.mini_rack_img
+                s.blit(sp, sp.get_rect(midbottom=(mx, int(hz["y"] + dy))))
 
     def draw_rack(self, s, dx, dy):
         if self.rack_y < -600:
@@ -1534,7 +2246,6 @@ class FightScreen:
         r = self.rack
         x = self.rack_x + dx + 130 - r.get_width() // 2
         y = int(self.rack_y) + dy
-        # motion streaks
         if self.mode == "cutscene" and self.phase in ("r1_fall", "r2_cue", "r2_dodge"):
             for i in range(4):
                 pygame.draw.line(
@@ -1547,30 +2258,35 @@ class FightScreen:
             if pr["kind"] == "coin":
                 img = pygame.transform.rotate(self.coin, pr["rot"])
                 s.blit(img, img.get_rect(center=(pr["x"] + dx, pr["y"] + dy)))
+            elif pr["kind"] == "screw":
+                img = pygame.transform.rotate(self.screw_img, pr["rot"])
+                s.blit(img, img.get_rect(center=(pr["x"] + dx, pr["y"] + dy)))
             elif pr["kind"] == "laser_charge":
                 a = 0.4 + 0.6 * abs(math.sin(pr["t"] * 18))
                 col = (255, int(80 + 100 * a), 80)
-                pygame.draw.circle(
-                    s, col, (int(pr["x"] + dx), 470 + dy), int(12 + 10 * a), 3
-                )
-                pygame.draw.circle(s, (255, 60, 60), (int(pr["x"] + dx), 470 + dy), 4)
-                pygame.draw.line(
-                    s,
-                    (255, 70, 70, 90),
-                    (int(pr["x"] + dx), 300),
-                    (int(pr["x"] + dx), 600),
-                    2,
-                )
+                cx = int(pr["x"] + dx)
+                cy = 470 + dy
+                pygame.draw.circle(s, col, (cx, cy), int(14 + 12 * a), 3)
+                pygame.draw.circle(s, (255, 60, 60), (cx, cy), 5)
+                pygame.draw.line(s, (255, 70, 70, 120), (cx, 240), (cx, 605), 3)
             elif pr["kind"] == "laser":
                 x0 = self.sam["x"] + dx - 100
                 x1 = pr["x"] + dx
                 yy = 470 + dy
-                w = 10
-                pygame.draw.line(s, (255, 60, 60), (x0, 360 + dy), (x1, yy), w + 8)
-                pygame.draw.line(s, (255, 230, 230), (x0, 360 + dy), (x1, yy), w)
+                w = 12
+                pygame.draw.line(
+                    s, (255, 60, 60), (x0, self.sam["y"] - 245 + dy), (x1, yy), w + 8
+                )
+                pygame.draw.line(
+                    s, (255, 230, 230), (x0, self.sam["y"] - 245 + dy), (x1, yy), w
+                )
                 glow = pygame.Surface((CW, CH), pygame.SRCALPHA)
                 pygame.draw.line(
-                    glow, (255, 90, 90, 90), (x0, 360 + dy), (x1, yy), w + 26
+                    glow,
+                    (255, 90, 90, 95),
+                    (x0, self.sam["y"] - 245 + dy),
+                    (x1, yy),
+                    w + 28,
                 )
                 s.blit(glow, (0, 0))
 
@@ -1607,10 +2323,11 @@ class FightScreen:
 
     def draw_hud(self, c):
         p, sm = self.player, self.sam
-        # top gradient
-        grad = pygame.Surface((CW, 150), pygame.SRCALPHA)
-        for i in range(150):
-            pygame.draw.line(grad, (4, 6, 9, int(180 * (1 - i / 150))), (0, i), (CW, i))
+        grad = pygame.Surface((CW, 155), pygame.SRCALPHA)
+        for i in range(155):
+            pygame.draw.line(
+                grad, (4, 6, 9, int(185 * (1 - i / 155))), (0, i), (CW, i)
+            )
         c.blit(grad, (0, 0))
 
         text(
@@ -1641,11 +2358,12 @@ class FightScreen:
             font="consolab",
         )
 
+        phase_names = {1: "ФАЗА 1", 2: "ФАЗА 2 · TURBO", 3: "ФАЗА 3 · AGI"}
         text(
             c,
-            "СЭМ АЛЬТМАН",
-            30,
-            WHITE,
+            "СЭМ АЛЬТМАН · %s" % phase_names.get(sm["boss_phase"], "ФАЗА 1"),
+            28,
+            WHITE if sm["boss_phase"] == 1 else (CYAN if sm["boss_phase"] == 2 else RED),
             (CW - 150, 30),
             anchor="topright",
             font="impact",
@@ -1674,66 +2392,95 @@ class FightScreen:
         c.blit(self.avatar, (CW - 44 - 72, 16))
         pygame.draw.circle(c, (60, 230, 160), (CW - 44 - 36, 16 + 36), 37, 2)
 
-        # round / combo
+        # Таймер раунда и номер раунда
         text(
             c,
             "ROUND %d" % self.round_no,
-            22,
+            20,
             (200, 210, 225),
-            (CW // 2, 30),
+            (CW // 2, 18),
             anchor="midtop",
             font="impact",
         )
+        t_col = RED if self.round_timer < 15 else GOLD
+        text(
+            c,
+            "%02d" % int(math.ceil(self.round_timer)),
+            44,
+            t_col,
+            (CW // 2, 42),
+            anchor="midtop",
+            font="impact",
+            outline=(14, 16, 22),
+        )
+
+        # Комбо-множитель
         if self.combo > 1:
             text(
                 c,
-                "%d HITS" % self.combo,
-                34,
+                "%d HITS · x%.2f" % (self.combo, self.combo_mult()),
+                30,
                 GOLD,
-                (CW // 2, 66),
+                (CW // 2, 92),
                 anchor="midtop",
                 font="impact",
                 outline=(60, 30, 0),
             )
-        # special cooldown
+
+        # Индикатор кулдауна F «50 вкладок Google Chrome»
         sp = self.player["special_cd"]
-        x0, y0 = 44, 140
-        pygame.draw.rect(c, (12, 16, 22), (x0, y0, 176, 30), border_radius=6)
-        pygame.draw.rect(c, (24, 28, 36), (x0 + 2, y0 + 2, 172, 26), border_radius=5)
-        frac = 1 - sp / 5.5
+        x0, y0 = 44, 134
+        pygame.draw.rect(c, (12, 16, 22), (x0, y0, 210, 30), border_radius=6)
+        pygame.draw.rect(c, (24, 28, 36), (x0 + 2, y0 + 2, 206, 26), border_radius=5)
+        frac = 1 - sp / self.SPECIAL_CD
         pygame.draw.rect(
             c,
             (255, 205, 90) if sp <= 0 else (90, 96, 110),
-            (x0 + 2, y0 + 2, int(172 * clamp(frac, 0, 1)), 26),
+            (x0 + 2, y0 + 2, int(206 * clamp(frac, 0, 1)), 26),
             border_radius=5,
         )
+        lbl = "F · 50 ВКЛАДОК [ГОТОВО]" if sp <= 0 else "F · ПЕРЕЗАРЯДКА %.1fс" % sp
         text(
             c,
-            "F · 50 ВКЛАДОК",
-            14,
-            (20, 22, 26) if sp <= 0 else (210, 215, 225),
-            (x0 + 88, y0 + 15),
+            lbl,
+            13,
+            (20, 22, 26) if sp <= 0 else (215, 220, 230),
+            (x0 + 105, y0 + 15),
             anchor="center",
             font="consolab",
         )
+
+        # Баннер смены фазы
+        if self.phase_banner_t > 0:
+            text(
+                c,
+                self.phase_banner,
+                42,
+                CYAN if sm["boss_phase"] == 2 else RED,
+                (CW // 2, 145),
+                anchor="midtop",
+                font="impact",
+                outline=(10, 12, 18),
+            )
+
         text(
             c,
-            "← → двигаться      ПРОБЕЛ удар      F спецприём",
+            "A/D движение   W прыжок   S отскок   ПРОБЕЛ удар / зажать: винт   F 50 вкладок",
             15,
             (190, 198, 210),
-            (CW // 2, 690),
+            (CW // 2, 694),
             anchor="midbottom",
             font="segoe",
-            alpha=190,
+            alpha=195,
         )
 
-        # sam speech bubble
+        # Реплики Сэма
         if self.sam_taunt_t > 0 and self.sam_taunt and self.mode == "fight":
             lines = wrap("segoeb", 20, self.sam_taunt, 360)
             bw = max(get_font("segoeb", 20).size(l)[0] for l in lines) + 36
             bh = 22 + len(lines) * 26
             bx = clamp(sm["x"] - bw // 2, 20, CW - bw - 20)
-            by = 170
+            by = max(130, int(sm["y"] - 435))
             box = pygame.Surface((bw, bh), pygame.SRCALPHA)
             pygame.draw.rect(box, (12, 40, 30, 235), box.get_rect(), border_radius=12)
             pygame.draw.rect(box, (60, 230, 160), box.get_rect(), 2, border_radius=12)
