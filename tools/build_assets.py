@@ -496,6 +496,22 @@ def make_thanks_wall(sam):
 # --------------------------------------------------------------------------
 # props
 # --------------------------------------------------------------------------
+def make_bsod_qr():
+    """Настоящий QR для синего экрана смерти (нужен пакет qrcode)."""
+    try:
+        import qrcode
+    except Exception:
+        print("  [qr] qrcode не установлен, оставляю готовый файл")
+        return
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                       box_size=5, border=2)
+    qr.add_data("https://www.windows.com/stopcode")
+    qr.make(fit=True)
+    img = qr.make_image(fill_color=(0, 0, 0), back_color=(255, 255, 255))
+    img = img.convert("RGB")
+    save(img, "bsod_qr.png")
+
+
 def make_rack():
     S = (300, 620)
     im = Image.new("RGBA", S, (0, 0, 0, 0))
@@ -1016,6 +1032,7 @@ def main():
     make_rack()
     make_coin()
     make_chrome()
+    make_bsod_qr()
     make_fight_extras()
     print("backgrounds")
     make_arena()

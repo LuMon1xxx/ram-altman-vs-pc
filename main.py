@@ -386,21 +386,33 @@ class Display:
             print("layered window failed:", e)
 
     def go_overlay(self, title):
-        """Borderless, always-on-top window sized to the game's 16:9 frame."""
+        """Безрамочное окно на весь экран поверх панели задач."""
         self.cover = False
         self.cover_blue = False
         sw, sh = screen_size()
-        scale = min(sw / CW, sh / CH)
-        w, h = max(2, int(CW * scale)), max(2, int(CH * scale))
-        self._new_mode((w, h), pygame.NOFRAME, title)
+        try:
+            os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
+        except Exception:
+            pass
+        self._new_mode((sw, sh), pygame.NOFRAME, title)
         self.fullscreen = True
         try:
             import ctypes
 
+            u = ctypes.windll.user32
             hwnd = pygame.display.get_wm_info().get("window")
-            x, y = (sw - w) // 2, (sh - h) // 2
-            ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
-            set_topmost()
+            u.SetWindowPos.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            u.SetWindowPos(hwnd, -1, 0, 0, sw, sh, 0x0001 | 0x0002 | 0x0004 | 0x0010)
+            hide_taskbar()
+            force_foreground()
         except Exception:
             pass
         pygame.mouse.set_visible(True)
@@ -440,6 +452,8 @@ class Display:
 def poll_quit(events):
     for e in events:
         if e.type == pygame.QUIT:
+            if GUARD.get("on"):
+                continue  # Alt+F4 и крестик игнорируем до конца партии
             raise QuitGame()
         if e.type == pygame.KEYDOWN:
             mods = pygame.key.get_mods()
@@ -548,6 +562,11 @@ class ToastScreen:
     def update(self, dt, events):
         self.t += dt
         self.slide = 1.0
+        # Отладочный автовыбор «Нет»: RAM_AUTONO=1 пропускает убегающую кнопку
+        if os.environ.get("RAM_AUTONO") and self.t > 1.2 and self.result is None:
+            self.result = "no"
+            self.done = True
+            return
 
         if self.t > 0.55 and self.scan_stage < 26:
             self.scan_t += dt
@@ -557,7 +576,7 @@ class ToastScreen:
                 if self.scan_stage == 17:
                     self.found = ""
                 if self.scan_stage >= 26:
-                    self.found = "Найдено 33 ГБ. Рекомендуется пожертвовать 1 ГБ."
+                    self.found = "Найдено 16 ГБ. Рекомендуется пожертвовать 1 ГБ."
 
         mp = pygame.mouse.get_pos()
         self.yes.hover = self.yes.rect.collidepoint(mp)
@@ -645,7 +664,7 @@ class ToastScreen:
                 "Сканирую оперативную память…",
                 "Сканирую оперативную память…",
                 "Анализ конфигурации…",
-                "Обнаружено 33 ГБ ОЗУ. Избыточно.",
+                "Обнаружено 16 ГБ ОЗУ. Избыточно.",
                 "Проверка завершена",
             ][min(4, self.scan_stage // 8)],
             11,
@@ -852,12 +871,12 @@ class FightScreen:
 
         # Основные спрайты
         _pi = pygame.image.load(asset("pc.png")).convert_alpha()
-        _ph = 300
+        _ph = 286
         self.pc_img = pygame.transform.smoothscale(
             _pi, (int(_pi.get_width() * _ph / _pi.get_height()), _ph)
         )
         _si = pygame.image.load(asset("sam_fight.png")).convert_alpha()
-        _sh = 318
+        _sh = 268
         self.sam_img = pygame.transform.smoothscale(
             _si, (int(_si.get_width() * _sh / _si.get_height()), _sh)
         )
@@ -2824,14 +2843,25 @@ class FightScreen:
 # BSOD
 # --------------------------------------------------------------------------
 class BSODScreen:
-    """Настоящий синий экран Windows 11: только текст, QR и счётчик.
+    """Синий экран смерти Windows 10 — компоновка один-в-один с оригиналом.
 
-    Никаких подсказок на экране нет. Реванш вызывается удержанием A + G + I.
+    Никаких подсказок на экране. Реванш — удержание A + G + I.
     """
 
-    BLUE = (0, 120, 215)
+    BLUE = (0, 120, 215)  # точный цвет BSOD
     WHITE = (255, 255, 255)
+    DIM = (232, 238, 248)
     HOLD = 0.4
+
+    # Раскладка снята с реального экрана и пересчитана на холст 1280x720
+    LEFT = 72
+    PARA_TOP = 248
+    PARA_LH = 51
+    PCT_TOP = 430
+    QR_XY = (72, 504)
+    QR_SIZE = 165
+    INFO_X = 262
+    INFO_LINES = (504, 526, 566, 620, 648, 676)
 
     def __init__(self, app):
         self.app = app
@@ -2839,71 +2869,14 @@ class BSODScreen:
         self.done = False
         self.result = None
         self.hold_t = 0.0
-        self.qr = self.make_qr(112)
+        self.qr = None
+        try:
+            q = pygame.image.load(asset("bsod_qr.png")).convert()
+            self.qr = pygame.transform.scale(q, (self.QR_SIZE, self.QR_SIZE))
+        except Exception:
+            self.qr = None
         self.app.audio.stop_music(200)
-        self.app.audio.play("bsod", 0.35)
-
-    # -- QR -----------------------------------------------------------------
-    def make_qr(self, size):
-        """Псевдо-QR: три маркера, тайминг-полосы, шум. Выглядит как настоящий."""
-        s = pygame.Surface((size, size))
-        s.fill(self.WHITE)
-        rnd = random.Random(2024)
-        n = 29
-        cell = size / float(n)
-        quiet = 0
-
-        def mod(x, y):
-            r = pygame.Rect(
-                quiet + int(x * cell),
-                quiet + int(y * cell),
-                int(cell) + 1,
-                int(cell) + 1,
-            )
-            pygame.draw.rect(s, (0, 0, 0), r)
-
-        # три квадрата-маркера
-        for ox, oy in ((0, 0), (n - 7, 0), (0, n - 7)):
-            pygame.draw.rect(
-                s,
-                (0, 0, 0),
-                (int(ox * cell), int(oy * cell), int(7 * cell), int(7 * cell)),
-            )
-            pygame.draw.rect(
-                s,
-                self.WHITE,
-                (
-                    int((ox + 1) * cell),
-                    int((oy + 1) * cell),
-                    int(5 * cell),
-                    int(5 * cell),
-                ),
-            )
-            pygame.draw.rect(
-                s,
-                (0, 0, 0),
-                (
-                    int((ox + 2) * cell),
-                    int((oy + 2) * cell),
-                    int(3 * cell),
-                    int(3 * cell),
-                ),
-            )
-        # тайминг-полосы
-        for i in range(8, n - 8):
-            if i % 2 == 0:
-                mod(i, 6)
-                mod(6, i)
-        # данные
-        for y in range(8, n):
-            for x in range(8, n):
-                if rnd.random() < 0.47:
-                    mod(x, y)
-        for y in range(0, 8):
-            for x in range(8, n - 8):
-                if rnd.random() < 0.5:
-                    mod(x, y)
-        return s
+        self.app.audio.play("bsod", 0.30)
 
     # -- update -------------------------------------------------------------
     def update(self, dt, events):
@@ -2921,80 +2894,79 @@ class BSODScreen:
     def draw(self):
         c = self.app.display.canvas
         c.fill(self.BLUE)
+        left = self.LEFT
 
-        # Отступы как в настоящем BSOD: левое поле ~11.7 % ширины,
-        # сверху крупный смайлик, ниже — абзац мелким Segoe UI Light.
-        left = 142
-        # «:(» как на настоящем экране: двоеточие и скобка стоят вплотную
-        text(c, ":", 104, self.WHITE, (left + 2, 78), font="segoel")
-        text(c, "(", 118, self.WHITE, (left + 30, 52), font="segoel")
+        # «:(» — один глиф Segoe UI Light, как в системе
+        text(c, ":(", 174, self.WHITE, (left - 2, 22), font="segoel")
 
-        y = 214
-        f_body = 25
-        lh = 36
-        para1 = (
-            "На вашем ПК возникла проблема, и его необходимо перезагрузить. "
-            "Мы собираем некоторые сведения об ошибке, затем выполним "
-            "перезагрузку автоматически."
+        # абзац: три строки, ровно как на настоящем экране
+        paras = (
+            "На вашем ПК возникла проблема, и его необходимо перезагрузить.",
+            "Сэм Альтман выпаял все 16 ГБ ОЗУ, а затем будет автоматически",
+            "выполнена отправка в дата-центр Сан-Франциско.",
         )
-        y = draw_para(c, para1, f_body, self.WHITE, left, y, 1010, lh, font="segoel")
+        y = self.PARA_TOP
+        for line in paras:
+            text(c, line, 38, self.WHITE, (left, y), font="segoel")
+            y += self.PARA_LH
 
-        y += 30
-        para2 = (
-            "1 ГБ вашей оперативной памяти был успешно выпаян агентом OpenAI "
-            "и отправлен экспресс-доставкой в дата-центр Сан-Франциско. "
-            "Сбор пожертвований на AGI: 100 % завершено."
-        )
-        y = draw_para(c, para2, f_body, self.WHITE, left, y, 1010, lh, font="segoel")
-
-        # счётчик «N % завершено», как на настоящем экране
-        y += 44
-        pct = min(100, int(max(0.0, self.t - 0.6) * 11))
-        text(c, "%d %% завершено" % pct, 25, self.WHITE, (left, y), font="segoel")
-
-        # нижний блок: QR + служебная информация
-        qy = CH - 154
-        c.blit(self.qr, (left, qy))
-        qs = self.qr.get_width()
-        tx = left + qs + 26
+        # счётчик — растёт от 0 до 100 и упирается в 100
+        pct = min(100, int(max(0.0, self.t - 0.8) * 9.5))
         text(
             c,
-            "Дополнительные сведения и возможные способы решения:",
-            16,
-            (238, 243, 250),
-            (tx, qy + 6),
+            "%d %% завершено" % pct,
+            33,
+            self.WHITE,
+            (left, self.PCT_TOP),
+            font="segoel",
+        )
+
+        # QR
+        if self.qr is not None:
+            c.blit(self.qr, self.QR_XY)
+
+        # служебный блок справа от QR
+        ix = self.INFO_X
+        i0, i0b, i1, i2, i3, i4 = self.INFO_LINES
+        text(
+            c,
+            "Дополнительные сведения об этой проблеме и возможных способах",
+            18,
+            self.WHITE,
+            (ix, i0),
             font="segoe",
         )
+        text(c, "ее решения см. здесь.", 18, self.WHITE, (ix, i0 + 20), font="segoe")
         text(
             c,
             "https://www.windows.com/stopcode",
-            16,
-            (238, 243, 250),
-            (tx, qy + 30),
+            18,
+            self.WHITE,
+            (ix, i1),
             font="segoe",
         )
         text(
             c,
-            "Если вы обратитесь в службу поддержки, сообщите следующие сведения:",
-            16,
-            (238, 243, 250),
-            (tx, qy + 66),
+            "При обращении в службу поддержки представьте следующие данные:",
+            18,
+            self.WHITE,
+            (ix, i2),
             font="segoe",
         )
         text(
             c,
             "Код остановки: CRITICAL_RAM_DEFICIT",
-            16,
+            18,
             self.WHITE,
-            (tx, qy + 90),
+            (ix, i3),
             font="segoe",
         )
         text(
             c,
             "Что вызвало проблему: SamAltman_SolderingIron.sys",
-            15,
-            (232, 238, 248),
-            (tx, qy + 112),
+            18,
+            self.WHITE,
+            (ix, i4),
             font="segoe",
         )
 
@@ -3101,7 +3073,7 @@ class VictoryScreen:
         )
 
         # ram counter
-        gb = int(33 * clamp((self.t - 0.6) / 2.2, 0, 1))
+        gb = int(16 * clamp((self.t - 0.6) / 2.2, 0, 1))
         text(
             c,
             "ОЗУ: %d ГБ" % gb,
@@ -3111,7 +3083,7 @@ class VictoryScreen:
             anchor="midtop",
             font="impact",
         )
-        bar(c, 740 - 190, 344, 380, 20, gb / 33.0, (120, 255, 190))
+        bar(c, 740 - 190, 344, 380, 20, gb / 16.0, (120, 255, 190))
 
         text(
             c,
@@ -3134,7 +3106,7 @@ class VictoryScreen:
         c.blit(self.logo, (592, 492))
         text(
             c,
-            "33 GB DDR5 · возвращено владельцу",
+            "16 GB DDR5 · возвращено владельцу",
             16,
             (140, 160, 155),
             (676, 524),
@@ -3267,6 +3239,226 @@ def minimize_desktop():
         return 0
 
 
+# --------------------------------------------------------------------------
+# SystemGuard: держим экран нашим до конца партии
+# --------------------------------------------------------------------------
+GUARD = {"on": False}
+
+
+def _tray_hwnds():
+    import ctypes
+
+    u = ctypes.windll.user32
+    out = []
+    for cls in ("Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+        h = u.FindWindowW(cls, None)
+        if h:
+            out.append(h)
+    return out
+
+
+def hide_taskbar():
+    try:
+        import ctypes
+
+        for h in _tray_hwnds():
+            ctypes.windll.user32.ShowWindow(h, 0)
+        return True
+    except Exception:
+        return False
+
+
+def show_taskbar():
+    try:
+        import ctypes
+
+        for h in _tray_hwnds():
+            ctypes.windll.user32.ShowWindow(h, 5)
+        return True
+    except Exception:
+        return False
+
+
+def force_foreground():
+    """Обходим foreground-lock Windows: окно встаёт поверх панели задач."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        hwnd = pygame.display.get_wm_info().get("window")
+        if not hwnd:
+            return
+        fg = u.GetForegroundWindow()
+        tid_self = ctypes.windll.kernel32.GetCurrentThreadId()
+        tid_fg = u.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = False
+        if tid_fg and tid_fg != tid_self:
+            attached = bool(u.AttachThreadInput(tid_fg, tid_self, True))
+        u.BringWindowToTop(hwnd)
+        u.SetForegroundWindow(hwnd)
+        u.SetFocus(hwnd)
+        if attached:
+            u.AttachThreadInput(tid_fg, tid_self, False)
+    except Exception:
+        pass
+
+
+class SystemGuard:
+    """Блокирует Alt+F4, Win, Alt+Tab и прячет панель задач, пока идёт игра.
+
+    Esc и Ctrl+Q остаются рабочими — из игры всегда можно выйти.
+    """
+
+    WH_KEYBOARD_LL = 13
+    WM_KEYDOWN = 0x0100
+    WM_KEYUP = 0x0101
+    WM_SYSKEYDOWN = 0x0104
+    WM_SYSKEYUP = 0x0105
+    DOWN = (0x0100, 0x0104)
+    UP = (0x0101, 0x0105)
+
+    BLOCK_ALONE = (0x5B, 0x5C, 0x5D)  # LWin, RWin, Menu
+    ALT_COMBO = (0x73, 0x09, 0x1B, 0x20)  # F4, Tab, Esc, Space
+    VK_MENU, VK_CONTROL, VK_SHIFT = 0x12, 0x11, 0x10
+    VK_ESCAPE = 0x1B
+
+    def __init__(self):
+        self.hook = None
+        self.cb = None
+        self.active = False
+        self._user32 = None
+        self._kbd = None
+
+    def _install_ctypes(self):
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        u.CallNextHookEx.restype = ctypes.c_ssize_t
+        u.CallNextHookEx.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        u.SetWindowsHookExW.restype = ctypes.c_void_p
+        u.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        u.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        u.GetAsyncKeyState.restype = ctypes.c_short
+        u.GetAsyncKeyState.argtypes = [ctypes.c_int]
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode", wintypes.DWORD),
+                ("scanCode", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+
+        self._user32 = u
+        self._kbd = KBDLLHOOKSTRUCT
+
+    # -- keyboard hook ------------------------------------------------------
+    def _callback(self, nCode, wParam, lParam):
+        u = self._user32
+        try:
+            if nCode == 0 and wParam in (self.DOWN + self.UP):
+                kbd = self._kbd.from_address(lParam)
+                vk = kbd.vkCode
+                down = wParam in self.DOWN
+                alt = u.GetAsyncKeyState(self.VK_MENU) & 0x8000
+                ctrl = u.GetAsyncKeyState(self.VK_CONTROL) & 0x8000
+                shift = u.GetAsyncKeyState(self.VK_SHIFT) & 0x8000
+                # Win надо глушить и на нажатие, и на отпускание
+                if vk in self.BLOCK_ALONE:
+                    return 1
+                if down:
+                    if alt and vk in self.ALT_COMBO:
+                        return 1
+                    if ctrl and vk == self.VK_ESCAPE:
+                        return 1
+                    if ctrl and shift and vk == self.VK_ESCAPE:
+                        return 1
+        except Exception:
+            return u.CallNextHookEx(None, nCode, wParam, lParam)
+        return u.CallNextHookEx(None, nCode, wParam, lParam)
+
+    def start(self):
+        if self.active:
+            return True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            self._install_ctypes()
+            HOOKPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+            )
+            self.cb = HOOKPROC(self._callback)
+            self.hook = self._user32.SetWindowsHookExW(
+                self.WH_KEYBOARD_LL, ctypes.cast(self.cb, ctypes.c_void_p), None, 0
+            )
+            self.active = bool(self.hook)
+        except Exception as e:
+            print("guard hook failed:", e)
+            self.active = False
+        hide_taskbar()
+        force_foreground()
+        GUARD["on"] = True
+        return self.active
+
+    def stop(self):
+        GUARD["on"] = False
+        show_taskbar()
+        if self.hook:
+            try:
+                self._user32.UnhookWindowsHookEx(self.hook)
+            except Exception:
+                pass
+        self.hook = None
+        self.cb = None
+        self.active = False
+
+    def keep_on_top(self):
+        """Раз в несколько кадров возвращаем окно поверх всего."""
+        if not GUARD.get("on"):
+            return
+        try:
+            import ctypes
+
+            u = ctypes.windll.user32
+            hwnd = pygame.display.get_wm_info().get("window")
+            if not hwnd:
+                return
+            if u.IsIconic(hwnd):
+                u.ShowWindow(hwnd, 9)  # SW_RESTORE
+            if u.GetForegroundWindow() != hwnd:
+                force_foreground()
+            if ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None):
+                if u.IsWindowVisible(u.FindWindowW("Shell_TrayWnd", None)):
+                    hide_taskbar()
+            sw, sh = screen_size()
+            u.SetWindowPos.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            u.SetWindowPos(hwnd, -1, 0, 0, sw, sh, 0x0001 | 0x0004 | 0x0010)
+        except Exception:
+            pass
+
+
 def hide_window():
     try:
         import ctypes
@@ -3281,9 +3473,11 @@ class App:
     def __init__(self):
         self.display = Display()
         self.audio = Audio()
+        self.guard = SystemGuard()
         self.clock = pygame.time.Clock()
 
     def run_screen(self, screen):
+        tick = 0
         while True:
             dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
             events = pygame.event.get()
@@ -3291,6 +3485,9 @@ class App:
             screen.update(dt, events)
             screen.draw()
             self.display.present()
+            tick += 1
+            if tick % 20 == 0:
+                self.guard.keep_on_top()
             if getattr(screen, "done", False):
                 return None
             if getattr(screen, "result", None):
@@ -3313,6 +3510,7 @@ class App:
             if toast.result == "yes":
                 self.app_audio_stop()
                 self.display.go_overlay("RAM Altman vs PC")
+                self.guard.start()
                 self.run_screen(ThanksScreen(self))
                 return
             if toast.result != "no":
@@ -3323,11 +3521,14 @@ class App:
             time.sleep(0.6)
             desktop = grab_desktop_surface()
             self.display.go_overlay("RAM Altman vs PC")
+            self.guard.start()
             fight = FightScreen(self, 1, overlay=True, desktop=desktop)
             if self.run_screen(fight) != "lost":
                 return
             bsod = BSODScreen(self)
             self.display.go_fullscreen("")
+            hide_taskbar()
+            self.guard.keep_on_top()
             if self.run_screen(bsod) != "rematch":
                 return
             self.display.go_overlay("RAM Altman vs PC")
@@ -3338,6 +3539,7 @@ class App:
         except QuitGame:
             pass
         finally:
+            self.guard.stop()
             self.app_audio_stop()
             try:
                 pygame.mixer.quit()
